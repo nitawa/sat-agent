@@ -1,0 +1,25 @@
+{
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "sk-dummy",
+    "model": "auto",
+    "ssl_cert_file": "",
+    "temperature": 0.0,
+    "timeout": 120
+  },
+  "sat": {
+    "root": "/path/to/SAT",
+    "project_root": "/path/to/SAT_SALOME",
+    "distro": "ubuntu",
+    "build_dir": "~/.local/share/sat-agent/builds"
+  },
+  "policy": {
+    "static_retries": 3,
+    "exec_retries": 2,
+    "exec_timeout_s": 600,
+    "tool_iteration_cap": 12,
+    "on_stage_failure": "abort",
+    "docker_mode": false
+  },
+  "work_dir": "~/.local/share/sat-agent/runs"
+}

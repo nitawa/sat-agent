@@ -1,0 +1,25 @@
+{
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "api_key": "sk-dummy",
+    "model": "qwen3:8b",
+    "ssl_cert_file": "",
+    "temperature": 0.0,
+    "timeout": 300
+  },
+  "sat": {
+    "root": "/home/nghodban/workspace/AI/sat-agent/workspace/sat",
+    "project_root": "/home/nghodban/workspace/AI/sat-agent/workspace/sat_salome",
+    "distro": "linuxmint:lmde-edu",
+    "build_dir": "/home/nghodban/workspace/AI/sat-agent/builds"
+  },
+  "policy": {
+    "static_retries": 10,
+    "exec_retries": 10,
+    "exec_timeout_s": 600,
+    "tool_iteration_cap": 12,
+    "on_stage_failure": "abort",
+    "docker_mode": false
+  },
+  "work_dir": "/home/nghodban/workspace/AI/sat-agent/runs"
+}
