@@ -5,21 +5,57 @@
     "model": "qwen3:8b",
     "ssl_cert_file": "",
     "temperature": 0.0,
-    "timeout": 300
+    "timeout": 300,
+    "max_retries": 3,
+    "extra_headers": {},
+    "extra_body": {}
   },
-  "sat": {
-    "root": "/home/nghodban/workspace/AI/sat-agent/workspace/sat",
-    "project_root": "/home/nghodban/workspace/AI/sat-agent/workspace/sat_salome",
-    "distro": "linuxmint:lmde-edu",
-    "build_dir": "/home/nghodban/workspace/AI/sat-agent/builds"
+  "paths": {
+    "sat": "../sat",
+    "sat_salome": "../sat_salome",
+    "work_root": "~/.local/share/sat-agent"
+  },
+  "application": "SALOME-master-native",
+  "sat_overrides": [
+    "APPLICATION.properties.git_server='github'"
+  ],
+  "git": {
+    "mode": "worktree",
+    "branch_prefix": "sat-agent/",
+    "commit": true
+  },
+  "docker": {
+    "run_as_host_user": true,
+    "extra_run_args": [],
+    "make_jobs": 0,
+    "verify_dockerfile": false
+  },
+  "web_search": {
+    "backend": "duckduckgo",
+    "searxng_url": "",
+    "tavily_api_key": "",
+    "max_results": 6
+  },
+  "tests": {
+    "enabled": true,
+    "use_xvfb": true,
+    "ctest_args": [
+      "--output-on-failure",
+      "--timeout",
+      "600"
+    ],
+    "include": "",
+    "exclude": "",
+    "timeout_s": 21600
   },
   "policy": {
-    "static_retries": 10,
-    "exec_retries": 10,
-    "exec_timeout_s": 600,
-    "tool_iteration_cap": 12,
-    "on_stage_failure": "abort",
-    "docker_mode": false
-  },
-  "work_dir": "/home/nghodban/workspace/AI/sat-agent/runs"
+    "sysdeps_passes": 4,
+    "prepare_fix_attempts": 3,
+    "compile_fix_attempts": 4,
+    "agent_iteration_cap": 30,
+    "max_test_cycles": 3,
+    "on_failure": "abort",
+    "command_timeout_s": 3600,
+    "compile_timeout_s": 43200
+  }
 }

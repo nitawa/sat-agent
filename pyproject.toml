@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sat-agent"
-version = "0.1.0"
-description = "AI Agent for SALOME compilation, pyconf configuration, and platform porting using SAT & SAT_SALOME"
+version = "0.2.0"
+description = "LangGraph agents porting SALOME (SAT / SAT_SALOME) to new Linux platforms"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "langgraph",
+    "langgraph>=1.0",
+    "langgraph-checkpoint-sqlite>=2.0",
     "requests",
-    "typing-extensions>=4.16.0",
+    "typing-extensions>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -21,13 +22,7 @@ dev = ["pytest"]
 sat-agent = "sat_agent.cli:main"
 
 [tool.setuptools]
-packages = [
-    "sat_agent",
-    "sat_agent.nodes",
-    "sat_agent.specialists",
-    "sat_agent.verify",
-    "sat_executor",
-]
+packages = ["sat_agent", "sat_agent.nodes", "sat_agent.agents", "sat_agent.tools"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
