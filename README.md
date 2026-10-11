@@ -226,6 +226,11 @@ Requirements: Docker (the user must be able to run `docker`), git, an OpenAI-com
 tool-calling LLM endpoint (Ollama, vLLM, LiteLLM, a gateway…). Tool calling quality matters for
 the fixer: prefer a strong model (e.g. a 30B+ coder model) over a small one.
 
+Every LLM call logs its tokens, named after the agent and turn that made it:
+`[build:compile 3] LLM call 42: 18234 in + 312 out tokens (4.1s) | total 512340 in + 9876 out`
+(from the `usage` field of the response; servers that omit it are reported as such). The totals are
+printed at the end of the run and written to the report (they restart from zero on `--resume`).
+
 Key settings (`config.example.json`):
 
 | Key | Meaning |

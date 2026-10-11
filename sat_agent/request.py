@@ -25,6 +25,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from sat_agent.llm import caller
 from sat_agent.logs import log
 
 # docker hub names of the distributions sat knows, and spoken names -> image
@@ -187,7 +188,8 @@ Answer with the JSON object only."""
 
 def _llm_extract(llm, prompt: str, apps: list[str]) -> dict:
     try:
-        obj = llm.ask_json(_EXTRACT_SYSTEM.replace("{apps}", ", ".join(apps)), prompt)
+        with caller("prompt"):
+            obj = llm.ask_json(_EXTRACT_SYSTEM.replace("{apps}", ", ".join(apps)), prompt)
     except Exception as e:  # noqa: BLE001 — the text rules still apply
         log.warning("could not interpret the prompt with the LLM (%s): using the text alone", e)
         return {}

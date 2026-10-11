@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from sat_agent import pyconf_edit as pe
+from sat_agent.llm import caller
 from sat_agent.logs import log
 from sat_agent.platform import dist_version_key
 
@@ -97,13 +98,14 @@ def pick_candidate(pkg: str, candidates: list[tuple[str, str]], llm=None) -> str
     if llm is not None:
         listing = "\n".join(f"- {n}: {d}" for n, d in candidates[:40] if n != pkg)
         try:
-            ans = llm.ask_json(
-                "You map Linux package names between distribution releases. Answer JSON only: "
-                '{"package": "<one name from the list>"} or {"package": null} if none is an equivalent.',
-                f"The package `{pkg}` (needed to build SALOME) does not exist on the new release.\n"
-                f"Candidates found in its repositories:\n{listing}\n"
-                "Which candidate provides the same library/tool (prefer the -dev/-devel variant if the "
-                "original was one, and the newest soname for runtime libraries)?")
+            with caller(f"sysdeps {pkg}"):
+                ans = llm.ask_json(
+                    "You map Linux package names between distribution releases. Answer JSON only: "
+                    '{"package": "<one name from the list>"} or {"package": null} if none is an equivalent.',
+                    f"The package `{pkg}` (needed to build SALOME) does not exist on the new release.\n"
+                    f"Candidates found in its repositories:\n{listing}\n"
+                    "Which candidate provides the same library/tool (prefer the -dev/-devel variant if the "
+                    "original was one, and the newest soname for runtime libraries)?")
             choice = (ans or {}).get("package") if isinstance(ans, dict) else None
             if choice in names:
                 return choice

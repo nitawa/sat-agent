@@ -106,6 +106,11 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
         if req.recommendations:
             lines += ["Instructions given to the agents:", ""] + [f"- {r}" for r in req.recommendations]
         lines += [f"- ({n})" for n in req.notes]
+    u = getattr(getattr(ctx, "llm", None), "usage", None)
+    if u and u.get("calls"):
+        lines += ["", "## LLM usage", "",
+                  f"{u['calls']} call(s), {u['prompt_tokens']} input + {u['completion_tokens']} output tokens "
+                  "(this process; a --resume counts from zero)."]
     lines += ["", "## Fixes applied by the build agent", ""]
     for f in state.get("fixes") or []:
         lines.append(f"### {f.get('phase')} — {f.get('product') or 'platform'}")

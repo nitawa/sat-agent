@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from sat_agent.llm import caller
 from sat_agent.logs import log
 
 MAX_TOOL_OUTPUT = 9000
@@ -175,7 +176,8 @@ def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: st
 def _turn(llm, messages, schemas, by_name, seen, turn, name):
     """One model turn. Returns the terminal outcome dict, "no_call", "repeat" or None."""
     _shorten_history(messages)
-    out = llm.chat(messages, tools=schemas)
+    with caller(f"{name} {turn}"):
+        out = llm.chat(messages, tools=schemas)
     calls = out["tool_calls"]
     if out["content"]:
         log.info("  [%s %d] %s", name, turn, out["content"][:300].replace("\n", " "))

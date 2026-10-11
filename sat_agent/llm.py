@@ -6,16 +6,29 @@ fabricates an answer when the endpoint is unreachable: an LLM failure is an
 error the graph reports.
 """
 
+import contextvars
 import json
 import re
 import time
 import uuid
+from contextlib import contextmanager
 
 import requests
 
 from sat_agent.logs import log
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+_CALLER = contextvars.ContextVar("llm_caller", default="llm")
+
+
+@contextmanager
+def caller(label: str):
+    """Names the LLM calls made inside the block in the token log (e.g. "build:compile 3")."""
+    token = _CALLER.set(label)
+    try:
+        yield
+    finally:
+        _CALLER.reset(token)
 
 
 class LLMError(RuntimeError):
@@ -101,11 +114,9 @@ class LLMClient:
                    **self.extra_body}
         if tools:
             payload["tools"] = [{"type": "function", "function": t} for t in tools]
+        started = time.time()
         body = self._post(payload)
-        u = body.get("usage") or {}
-        self.usage["calls"] += 1
-        self.usage["prompt_tokens"] += u.get("prompt_tokens", 0) or 0
-        self.usage["completion_tokens"] += u.get("completion_tokens", 0) or 0
+        self._count(body.get("usage") or {}, time.time() - started)
         try:
             msg = body["choices"][0]["message"]
         except (KeyError, IndexError) as e:
@@ -126,6 +137,22 @@ class LLMClient:
         if not calls and tools:
             calls = text_tool_calls(content, {t["name"] for t in tools})
         return {"content": _strip_think(content), "tool_calls": calls, "raw": msg}
+
+    def _count(self, u: dict, seconds: float) -> None:
+        """Logs the tokens of one call and adds them to the run's totals."""
+        self.usage["calls"] += 1
+        who = _CALLER.get()
+        if not u:
+            log.info("  [%s] LLM call %d: token usage not returned by the server (%.1fs)",
+                     who, self.usage["calls"], seconds)
+            return
+        tin, tout = u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0
+        self.usage["prompt_tokens"] += tin
+        self.usage["completion_tokens"] += tout
+        reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
+        log.info("  [%s] LLM call %d: %d in + %d out tokens%s (%.1fs) | total %d in + %d out",
+                 who, self.usage["calls"], tin, tout, f" ({reasoning} reasoning)" if reasoning else "",
+                 seconds, self.usage["prompt_tokens"], self.usage["completion_tokens"])
 
     def ask_json(self, system: str, user: str, retries: int = 2):
         """One-shot question whose answer must be JSON."""

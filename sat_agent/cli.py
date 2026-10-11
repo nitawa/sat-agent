@@ -214,6 +214,10 @@ def cmd_port(args) -> int:
     failed = [n for n, s in ((final.get("tests") or {}).get("results") or {}).items()
               if s not in ("passed", "skipped")]
     log.info("build %s, %d failing test(s); report %s", status, len(failed), final.get("report_path"))
+    if ctx.llm is not None:
+        u = ctx.llm.usage
+        log.info("LLM: %d call(s), %d input + %d output tokens", u["calls"], u["prompt_tokens"],
+                 u["completion_tokens"])
     return 0 if status == "ok" and not failed else 1
 
 
