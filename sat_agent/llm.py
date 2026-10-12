@@ -16,6 +16,7 @@ from contextlib import contextmanager
 import requests
 
 from sat_agent.logs import log
+from sat_agent.trace import tracer
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 _CALLER = contextvars.ContextVar("llm_caller", default="llm")
@@ -114,13 +115,21 @@ class LLMClient:
                    **self.extra_body}
         if tools:
             payload["tools"] = [{"type": "function", "function": t} for t in tools]
+        who = _CALLER.get()
+        n = tracer.llm_request(who, messages, tools)
         started = time.time()
-        body = self._post(payload)
+        try:
+            body = self._post(payload)
+        except LLMError as e:
+            tracer.llm_error(who, n, e)
+            raise
         self._count(body.get("usage") or {}, time.time() - started)
         try:
             msg = body["choices"][0]["message"]
         except (KeyError, IndexError) as e:
+            tracer.llm_error(who, n, LLMError(f"malformed LLM response: {str(body)[:2000]}"))
             raise LLMError(f"malformed LLM response: {str(body)[:300]}") from e
+        tracer.llm_response(who, n, msg, body.get("usage") or {}, time.time() - started)
         calls = []
         for tc in msg.get("tool_calls") or []:
             fn = tc.get("function") or {}

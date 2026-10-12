@@ -231,6 +231,15 @@ Every LLM call logs its tokens, named after the agent and turn that made it:
 (from the `usage` field of the response; servers that omit it are reported as such). The totals are
 printed at the end of the run and written to the report (they restart from zero on `--resume`).
 
+`--trace` (or `--trace-file FILE`, or `trace.enabled` in the config) writes a full, chronological
+trace to `<work_root>/traces/trace-<date>.log`: every graph step with its state update, every
+request sent to the LLM (the messages new since the previous request of the same conversation —
+system prompt, task, tool outputs, nudges — and the tool schemas once), every answer as the server
+returned it (including `<think>` blocks and `reasoning_content`/`reasoning` when the server sends
+them, and the usage), and every tool call with its arguments (also as sent by the model, before
+type coercion), its duration and the exact text sent back to the model. Nothing is truncated:
+the file can grow large on a long run.
+
 Key settings (`config.example.json`):
 
 | Key | Meaning |

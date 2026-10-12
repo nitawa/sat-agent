@@ -52,6 +52,11 @@ DEFAULT_CONFIG: dict = {
         "exclude": "",               # ctest -E regex
         "timeout_s": 6 * 3600,
     },
+    # Full trace of graph steps, LLM requests/answers and tool calls (also: sat-agent port --trace).
+    "trace": {
+        "enabled": False,
+        "file": "",                  # empty = <work_root>/traces/trace-<date>.log
+    },
     "policy": {
         "sysdeps_passes": 4,
         "prepare_fix_attempts": 3,

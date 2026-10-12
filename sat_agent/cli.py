@@ -5,6 +5,7 @@
     sat-agent port --prompt-file request.txt --dry-run   # show how the request is understood
     sat-agent port ubuntu:26.10 --batch      # unattended (policy.on_failure decides)
     sat-agent port debian:14 --resume        # continue the last run of that platform
+    sat-agent port fedora:45 --trace         # + full trace of steps, LLM messages and tool calls
     sat-agent guard FD45                     # re-check the non-regression guard of a port
     sat-agent -w /data/sat-agent port fedora:45   # another working directory than the config's
 """
@@ -18,6 +19,7 @@ from pathlib import Path
 
 from sat_agent.config import load_config
 from sat_agent.logs import log, setup_logging
+from sat_agent.trace import tracer
 
 
 def get_config(args) -> dict:
@@ -63,13 +65,16 @@ def drive(app, inp, config) -> dict:
     from langgraph.types import Command
 
     while True:
-        for _ in app.stream(inp, config=config, stream_mode="updates", subgraphs=True):
-            pass
+        for ns, chunk in app.stream(inp, config=config, stream_mode="updates", subgraphs=True):
+            for node, update in (chunk or {}).items():
+                tracer.step(ns, node, update)
         snap = app.get_state(config, subgraphs=True)
         pending = _find_interrupt(snap)
         if pending is None:
             return dict(snap.values)
-        inp = Command(resume=ask_gate(pending))
+        decision = ask_gate(pending)
+        tracer.note("failure gate", json.dumps({"payload": pending, "decision": decision}, indent=1, default=str))
+        inp = Command(resume=decision)
 
 
 def _find_interrupt(snap):
@@ -151,6 +156,16 @@ def branch_decision(args):
     return decide
 
 
+def start_trace(args, cfg: dict) -> None:
+    """--trace / --trace-file (or config trace.enabled / trace.file): opens the trace file of this run."""
+    if not (args.trace or args.trace_file or cfg["trace"]["enabled"]):
+        return
+    path = args.trace_file or cfg["trace"]["file"] or \
+        Path(cfg["paths"]["work_root"]) / "traces" / f"trace-{time.strftime('%Y%m%d-%H%M%S')}.log"
+    llm = {k: v for k, v in cfg["llm"].items() if k not in ("api_key", "extra_headers")}   # no secrets
+    log.info("trace: %s", tracer.open(path, {"argv": sys.argv, "llm": llm}))
+
+
 def cmd_port(args) -> int:
     from sat_agent import request as rq
     from sat_agent.context import open_port
@@ -162,6 +177,7 @@ def cmd_port(args) -> int:
     from sat_agent.docker_env import docker_available
 
     cfg = get_config(args)
+    start_trace(args, cfg)
     llm = LLMClient(cfg["llm"]) if cfg["llm"].get("base_url") and cfg["llm"].get("model") else None
     try:
         req = make_request(args, cfg, llm)
@@ -267,6 +283,10 @@ def main(argv=None) -> int:
                     help="if an earlier port of this platform left its branches, continue them")
     pp.add_argument("--until", choices=["sysdeps", "prepare"],
                     help="stop after this phase (staged run; continue later without --until)")
+    pp.add_argument("--trace", action="store_true",
+                    help="write every graph step, every message sent to / received from the LLM and every tool "
+                         "call (arguments and output) to <work_root>/traces/trace-<date>.log")
+    pp.add_argument("--trace-file", metavar="FILE", help="like --trace, to FILE")
     pp.add_argument("--verify-dockerfile", action="store_true",
                     help="rebuild the exported Dockerfile from scratch at the end and re-check it")
     pg = sub.add_parser("guard", help="check that a port does not change any other platform")
@@ -284,6 +304,8 @@ def main(argv=None) -> int:
         log.debug("fatal", exc_info=True)
         log.error("%s: %s", type(e).__name__, e)
         return 2
+    finally:
+        tracer.close()
 
 
 if __name__ == "__main__":

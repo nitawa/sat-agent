@@ -11,7 +11,8 @@ Guard rails for small models, which tend to loop on one call:
 - a few turns before the budget ends, the model is asked to conclude;
 - when the budget is spent, one last turn offers only `finish`, so the
   pipeline always gets a diagnosis instead of "no conclusion".
-Every conversation can be saved (transcript) to understand a failure.
+Every conversation can be saved (transcript) to understand a failure; with --trace, every
+request, answer and tool call is also written as it happens (sat_agent/trace.py).
 """
 
 import json
@@ -23,6 +24,7 @@ from typing import Callable
 
 from sat_agent.llm import caller
 from sat_agent.logs import log
+from sat_agent.trace import tracer
 
 MAX_TOOL_OUTPUT = 9000
 HISTORY_BUDGET = 160_000      # characters kept verbatim; older tool outputs are shortened
@@ -197,7 +199,9 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name):
     all_repeats = True
     for c in calls:
         tool = by_name.get(c["name"])
-        args = c["arguments"] if isinstance(c["arguments"], dict) else {}
+        raw_args = c["arguments"]
+        args = raw_args if isinstance(raw_args, dict) else {}
+        started, note = None, ""
         if tool is not None:
             args = coerce_args(args, tool.parameters)
         log.info("  [%s %d] -> %s(%s)", name, turn, c["name"],
@@ -206,7 +210,9 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name):
         if tool is None:
             result = f"unknown tool {c['name']!r}; available: {', '.join(by_name)}"
             all_repeats = False
+            note = "unknown tool"
         elif key in seen and not tool.terminal:
+            note = f"repeat of turn {seen[key]}, not run"
             result = (f"You already called {c['name']} with exactly these arguments at turn {seen[key]}: the "
                       "result is the same, it is above. Do not repeat a call. Use what you learned: try another "
                       "tool (e.g. web_search the first error without quotes or paths, fetch_url an upstream "
@@ -224,11 +230,15 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name):
                 result = f"{type(e).__name__}: {e}"
             if tool.terminal and isinstance(result, dict):
                 result.setdefault("turns", turn)
+                tracer.tool(f"{name} {turn}", tool.name, args, result, time.time() - started, raw_args=raw_args)
                 return result
             log.debug("  [%s %d] %s took %.1fs", name, turn, tool.name, time.time() - started)
         result = clean_text(str(result))
         if len(result) > MAX_TOOL_OUTPUT:
             result = result[:MAX_TOOL_OUTPUT // 2] + "\n[... truncated ...]\n" + result[-MAX_TOOL_OUTPUT // 2:]
+        tracer.tool(f"{name} {turn}", c["name"], args, result, time.time() - started if started is not None else None,
+                    note,
+                    raw_args=raw_args)
         if native:
             messages.append({"role": "tool", "tool_call_id": c["id"], "content": result})
         else:

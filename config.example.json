@@ -42,6 +42,10 @@
     "exclude": "",
     "timeout_s": 21600
   },
+  "trace": {
+    "enabled": false,
+    "file": ""
+  },
   "policy": {
     "sysdeps_passes": 4,
     "prepare_fix_attempts": 3,

@@ -337,13 +337,12 @@ def clone_section(text: str, src: str, dst: str) -> str:
     return add_section(text, dst, section_text(text, src), after=src)
 
 
-# sat_salome names platform sections <section>_<DIST_SUFFIX>: default_FD44, version_4_2_0_FD42, ..._UB26_04
 _PLATFORM_SUFFIX_RE = re.compile(r"_[A-Z]{2,}\d+(?:_\d+)?$")
 
 
 def platform_section_name(section: str, suffix: str) -> str:
     """Name of the new platform's variant of a section: default -> default_FD45,
-    version_4_2_0_FD42 -> version_4_2_0_FD45 (the reference's suffix is replaced)."""
+    version_4_2_0_FD44 -> version_4_2_0_FD45 (the reference's suffix is replaced)."""
     if section.endswith("_" + suffix):
         return section
     return _PLATFORM_SUFFIX_RE.sub("", section) + "_" + suffix
