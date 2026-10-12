@@ -41,7 +41,37 @@ def _checkpointer(path: Path):
         return MemorySaver()
 
 
+def ask_native(payload: dict) -> dict:
+    """A native product without a package on the new platform: embed it or not."""
+    embed = payload.get("embed") or {}
+    print("\n" + "=" * 78, file=sys.stderr)
+    print(f"Native product {payload['product']}: no {payload.get('family')} package found on "
+          f"{payload.get('pretty') or payload.get('dist')} for {', '.join(payload.get('packages') or [])}",
+          file=sys.stderr)
+    for e in payload.get("evidence") or []:
+        print(f"  web: {e}", file=sys.stderr)
+    if payload.get("last_error"):
+        print(f"  ! {payload['last_error']}", file=sys.stderr)
+    print("=" * 78, file=sys.stderr)
+    if not sys.stdin.isatty():
+        return {"action": "embed" if embed else "remove"}
+    choices = (f"[e]mbed it (build {embed['tag']} from sources: {embed.get('why')}) / " if embed else "") + \
+        "[p]ackage name / [n]ative without package / [r]emove it on this platform ? "
+    while True:
+        ans = input(choices).strip().lower()
+        if ans.startswith("e") and embed:
+            return {"action": "embed"}
+        if ans.startswith("p"):
+            return {"action": "package", "package": input("package name: ").strip()}
+        if ans.startswith("n"):
+            return {"action": "none"}
+        if ans.startswith("r"):
+            return {"action": "remove"}
+
+
 def ask_gate(payload: dict) -> dict:
+    if payload.get("kind") == "native_product":
+        return ask_native(payload)
     print("\n" + "=" * 78, file=sys.stderr)
     print(f"Build agent stopped: {payload.get('phase')} of {payload.get('product') or 'the platform'}",
           file=sys.stderr)

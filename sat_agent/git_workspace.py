@@ -131,6 +131,14 @@ def commit_all(path: Path, message: str) -> str | None:
     return sha
 
 
+def merge(path: Path, branch: str, message: str) -> str:
+    """Merges branch into the checkout's HEAD (always a merge commit, so the port branch shows it)."""
+    identity = [] if git(path, "config", "--get", "user.email", check=False) else \
+        ["-c", "user.name=sat-agent", "-c", "user.email=sat-agent@localhost"]
+    git(path, *identity, "merge", "-q", "--no-ff", "-m", message, branch)
+    return git(path, "rev-parse", "--short", "HEAD")
+
+
 def changed_files(path: Path, base: str) -> list[tuple[str, str]]:
     """[(status, path)] of committed + uncommitted changes since base."""
     out = git(path, "diff", "--name-status", base)

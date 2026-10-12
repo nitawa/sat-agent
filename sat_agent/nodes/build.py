@@ -1,8 +1,8 @@
 """Build agent nodes (a LangGraph subgraph, see graph.py).
 
-    entry ──► setup_platform ──► apply_guidance ──► system_deps ──► prepare ──► compile ──► END (build ok)
-      │                       (maintainer's            │              │           │
-      │                        instructions, once)     └──────────────┴─────┬─────┘ failure
+    entry ──► setup_platform ──► native_choices ──► apply_guidance ──► system_deps ──► prepare ──► compile ──► END
+      │                       (native products     (maintainer's            │              │           │
+      │                        without a package)   instructions, once)     └──────────────┴─────┬─────┘ failure
       │                                                   ▼
       └──► apply_feedback ◄─────────────┐               fix ──(fixed)──► rebuild ──► back to the phase
            (test agent reports)          │                 │                          (or apply_feedback)
@@ -24,7 +24,8 @@ from sat_agent.diagnose import pre_analysis
 from sat_agent.logs import log
 from sat_agent.parsers import first_errors, parse_check_system, parse_compile, parse_prepare, strip_ansi
 from sat_agent.platform import choose_reference_platform
-from sat_agent.sysdeps import SysdepsReport, apply_replacement, resolve_missing, seed_from_reference_dockerfile
+from sat_agent.sysdeps import (SysdepsReport, apply_replacement, declare_translated, resolve_missing,
+                               seed_from_reference_dockerfile, translate_declarations, translate_names)
 from sat_agent.tools.build_tools import FixSession
 from sat_agent.tools.common import make_common_tools
 
@@ -77,7 +78,7 @@ def setup_platform(state, config):
     ref = state.get("ref_dist") or choose_reference_platform(ctx.dist, [p for p in known if p != ctx.dist],
                                                             ctx.family)
     if state.get("done", {}).get("setup"):
-        return Command(update={"ref_dist": ref, "platforms": platforms}, goto="apply_guidance")
+        return Command(update={"ref_dist": ref, "platforms": platforms}, goto="native_choices")
     log.info("registering %s in %s (reference platform: %s)", ctx.dist, app_file.name, ref or "none")
 
     app_text = pe.app_add_platform(app_text, ctx.dist)
@@ -97,6 +98,8 @@ def setup_platform(state, config):
                 log.info("  %s: system_info.\"%s\" copied from \"%s\"", f.name, ctx.dist, ref)
 
     report = SysdepsReport()
+    # a package manager the reference does not use (Arch: pacman): declare the platform's names first
+    translate_declarations(ctx, ref, report)
     ref_df = None
     if ref:
         cands = sorted((ctx.sat_salome_dir / "dockers").glob(f"SALOMEPlatform.Dockerfile.{ref.lower()}-*"))
@@ -105,7 +108,83 @@ def setup_platform(state, config):
     _commit(ctx, f"Register platform {ctx.dist} ({ctx.osr.pretty_name}), inherited from {ref or 'nothing'}")
     done = dict(state.get("done") or {}, setup=True)
     return Command(update={"ref_dist": ref, "platforms": platforms, "done": done,
-                           "sysdeps": _merge_report(state.get("sysdeps"), report)}, goto="apply_guidance")
+                           "sysdeps": _merge_report(state.get("sysdeps"), report),
+                           "native_choices": report.undecided}, goto="native_choices")
+
+
+# ------------------------------------------------------------------------- native products without a package
+
+NATIVE_ACTIONS = ("embed", "package", "none", "remove")
+
+
+def native_choices(state, config):
+    """One native product left without a package on the platform (translate_declarations) per
+    pass: the maintainer decides (batch: policy.unmapped_native) to embed it (build it from sources
+    on this platform), to give its package name, to keep it native without a package, or to remove
+    it from the application on this platform."""
+    ctx = _ctx(config)
+    pending = list(state.get("native_choices") or [])
+    if not pending:
+        return Command(goto="apply_guidance")
+    item = pending[0]
+    product, embed = item["product"], item.get("embed") or {}
+    if state.get("batch"):
+        decision = {"action": _policy(ctx).get("unmapped_native", "embed")}
+    else:
+        decision = interrupt({"kind": "native_product", "dist": ctx.dist, "pretty": ctx.osr.pretty_name,
+                              "family": ctx.family.name, **item})
+    act = decision.get("action")
+    if act == "embed" and not embed.get("tag"):
+        log.warning("%s: no version known to build it from sources", product)
+        act = "remove" if state.get("batch") else None
+    fixes, skipped = list(state.get("fixes") or []), list(state.get("skipped") or [])
+    app = ctx.app_file()
+    if act == "embed":
+        app.write_text(pe.app_overwrite_set(app.read_text(encoding="utf-8"), ctx.dist,
+                                            f"APPLICATION.products.{product}",
+                                            pe.product_spec_text(embed["tag"], embed.get("section"))),
+                       encoding="utf-8")
+        summary = (f"{product} is built from sources on {ctx.dist} (version {embed['tag']}: {embed.get('why')}): "
+                   f"no {ctx.family.name} package for {', '.join(item['packages'])}.")
+    elif act == "package":
+        pkg = (decision.get("package") or "").strip()
+        if not pkg or not ctx.installable([pkg]).get(pkg):
+            log.warning("%s: package %r is not installable on %s", product, pkg, ctx.dist)
+            item = dict(item, last_error=f"{pkg!r} is not installable on {ctx.dist}")
+            return Command(update={"native_choices": [item] + pending[1:]}, goto="native_choices")
+        src = list(item["lists"])[0]
+        mapping = translate_names(ctx, [x for v in item["lists"].values() for x in v], src)
+        mapping.update({x: pkg for x in item["packages"]})
+        _save_mapping(ctx, src, {x: pkg for x in item["packages"]})
+        declare_translated(ctx, ctx.product_file(product), item["section"], item.get("tag"), item["lists"], mapping)
+        summary = f"{product}: {', '.join(item['packages'])} is `{pkg}` on {ctx.dist} (given by the maintainer)."
+    elif act == "none":
+        src = list(item["lists"])[0]
+        mapping = translate_names(ctx, [x for v in item["lists"].values() for x in v], src)
+        declare_translated(ctx, ctx.product_file(product), item["section"], item.get("tag"), item["lists"], mapping)
+        summary = (f"{product} stays native on {ctx.dist} without {', '.join(item['packages'])} "
+                   "(maintainer's decision).")
+    elif act == "remove":
+        app.write_text(pe.app_add_rm_product(app.read_text(encoding="utf-8"), ctx.dist, product), encoding="utf-8")
+        summary = f"{product} removed from {ctx.app} on {ctx.dist}: no {ctx.family.name} package."
+        skipped.append(product)
+    else:
+        item = dict(item, last_error=f"unknown decision {decision!r}")
+        return Command(update={"native_choices": [item] + pending[1:]}, goto="native_choices")
+    log.info("%s", summary)
+    fixes.append({"phase": "native", "product": product, "summary": summary,
+                  "actions": item.get("evidence") or []})
+    _commit(ctx, summary)
+    return Command(update={"native_choices": pending[1:], "fixes": fixes, "skipped": skipped},
+                   goto="native_choices")
+
+
+def _save_mapping(ctx, src: str, entries: dict) -> None:
+    import json
+    f = ctx.port_dir / f"pkgmap-{src}-{ctx.family.name}.json"
+    cache = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+    cache.update(entries)
+    f.write_text(json.dumps(cache, indent=1, sort_keys=True), encoding="utf-8")
 
 
 # ------------------------------------------------------------------------- maintainer's instructions

@@ -396,8 +396,9 @@ def system_info_dists(text: str) -> list[str]:
         s, e = pt.block(["default", "system_info"]).inner
     except PyconfEditError:
         return []
-    return [k for k, _, _ in pt.keys_in(s, e) if k not in ("rpm", "rpm_dev", "apt", "apt_dev")
-            and not k.endswith("_exclude")]
+    # platform blocks are named by sat codes (uppercase: "UB24.04", "FD44", "AR"); package-name
+    # keys are lowercase (rpm, apt_dev, pacman, apk..., <key>_exclude)
+    return [k for k, _, _ in pt.keys_in(s, e) if k[:1].isupper()]
 
 
 def clone_system_info_block(text: str, ref: str, dist: str) -> str:

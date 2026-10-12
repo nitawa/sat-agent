@@ -44,7 +44,7 @@ Method:
       version of the product (set_product_version 'native'), a newer version that has the fix, a
       CMake option avoiding the incompatible part (e.g. use the system copy of a bundled library:
       -DCMAKE_USE_SYSTEM_CURL=ON for cmake), or a minimal patch taken from upstream (edit_source).
-3. Check your hypothesis cheaply before acting (run_shell: pkg-config --modversion, rpm -q / dpkg -l,
+3. Check your hypothesis cheaply before acting (run_shell: pkg-config --modversion, rpm -q / dpkg -l / pacman -Q,
    gcc --version, grep in /usr/include). Never repeat a call with the same arguments.
 4. Apply ONE coherent fix with the action tools, then call finish(status='fixed', summary=<what and
    why, with the reference URL if any>, rebuild=[products to recompile], patch_title=<short title if

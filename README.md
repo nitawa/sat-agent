@@ -70,8 +70,21 @@ text, and the whole prompt is given to the agents.
 The workflow is the documented one ([SAT wiki](https://github.com/SalomePlatform/.github/wiki/SAT),
 `sat_salome/dockers/README.md`), automated and self-healing:
 
-1. **Platform container.** The image's `/etc/os-release` gives the package family
-   (apt / dnf / zypper — the two families sat can check, dpkg/apt and rpm). A bootstrap image
+1. **Platform container.** The image's `/etc/os-release` gives the distribution. If sat does not
+   know it (its `NAME` matches no key of sat's `distrib.pyconf`), sat-agent finds out how to
+   support it (`distro_support.py`, kept in `<work_root>/distros/<id>.json`):
+   - **derivative** of a distribution sat knows (`ID_LIKE`, else a web search read by the LLM:
+     Zorin OS → Ubuntu): it keeps its parent's two-letter code and version rule (Pop!_OS → `UB24.04`);
+   - otherwise a **new two-letter code**, unique among sat's (arch → `AR`, alpine → `AL`,
+     void → `VO`), and a **version rule**: none for a rolling release (no `VERSION_ID`, or the
+     image date as on Arch), else the numbering found on the web (`major.minor` for Alpine 3.24 →
+     `AL3.24`), `major` by default;
+   - its **package manager**: the one found in the image among apt, dnf, zypper, pacman, apk,
+     xbps; for another one, the LLM describes it from the web (commands to refresh, install,
+     search, tell installed/available packages, and the check sat will run), and the description
+     is used only once it passes in the image (real and bogus package names, an install, a search).
+
+   sat then learns the distribution on a dedicated branch (see [sat changes](#sat-changes)). A bootstrap image
    (git, python3 + distro, toolchain, Xvfb) is built, and **sat's own detection code**
    (`src/architecture.py`) tells the platform code. Unknown derivatives are added to
    `distrib.pyconf` from `ID_LIKE`. A long-lived container mounts the port directory at the same
@@ -87,7 +100,27 @@ The workflow is the documented one ([SAT wiki](https://github.com/SalomePlatform
      `<DIST>`; shared blocks (`['FD42', 'FD44']`) get `<DIST>` in their condition;
    - `system_info."<REF>"` blocks (salome_system.pyconf) are copied as `system_info."<DIST>"`;
    - the reference's Dockerfile packages (`dockers/SALOMEPlatform.Dockerfile.<ref>-*`) are
-     checked against the new repositories and installed (renamed ones mapped).
+     checked against the new repositories and installed (renamed ones mapped);
+   - another package manager than the reference's (Arch, Alpine, Void... whose reference is the
+     newest Fedora): nothing in sat_salome declares its names yet, so the names sat checks on the
+     reference (rpm/rpm_dev of every native product of the application) are translated — guesses
+     checked in the target repositories (`boost-devel` → `boost` / `boost-dev`, `python3-X` →
+     `python-X` / `py3-X`), then the LLM for the rest, checked too — and declared for `<DIST>`
+     only: `system_info."AR".pacman/pacman_dev` in salome_system.pyconf, a `default_AR` section
+     selected by the application elsewhere. The mapping is kept in
+     `ports/<DIST>/pkgmap-rpm-<family>.json`. A name still without equivalent is looked up on the
+     web: what the reference package is (`Fedora package freeimage-devel` → the FreeImage
+     library), then that project on the target (web + the target's repositories); the LLM's
+     answer counts only if the package installs in the image (a conflicting one such as
+     `zlib-ng-compat` gets a second turn: `zlib`), and what the web said is kept in
+     `pkgmap-*.evidence.json`.
+   - a **native product still without a package** (freeimage, metis: AUR-only on Arch) is left
+     to you (`native_choices`), with the web evidence: **embed** it — build it from sources on
+     this platform only, with the version the application builds elsewhere (freeimage 3.18.0 as
+     on CO10), else the one of the non-native application (`SALOME-master`), else the newest
+     `version_*` section —, give its **package** name (checked in the image), keep it **native**
+     without a package, or **remove** it from the application on this platform. `--batch`:
+     `policy.unmapped_native` (`embed` by default; `none`, `remove`).
 3. **System prerequisites** (`system_deps`). `sat config <APP> --check_system` is run until
    nothing is missing. Existing names are installed; vanished ones (new soname, `t64`, new
    compiler major…) are mapped to the new name (package-manager search + LLM tie-break) and
@@ -159,12 +192,24 @@ Two layers:
 
 ### sat changes
 
-On its branch, sat gets two generic, backward-compatible capabilities (`sat_capabilities.py`):
+On its branch, sat gets generic, backward-compatible capabilities (`sat_capabilities.py`):
 
-- `system_info."<DIST>".apt_exclude` / `rpm_exclude`, honoured by `check_system_dep` — lets a
-  platform drop a generic package that no longer exists, without touching the generic list
-  (no other platform uses the key);
-- missing distribution names (new derivative) added to `src/internal_config/distrib.pyconf`.
+- `system_info."<DIST>".<key>_exclude` (`apt_exclude`, `rpm_exclude`, `pacman_exclude`...), honoured by
+  `check_system_dep` — lets a platform drop a generic package that no longer exists, without
+  touching the generic list (no other platform uses the key);
+- missing distribution names (new derivative) added to `src/internal_config/distrib.pyconf`;
+- a distribution sat does not know, on its own branch **`sat-agent/distro-<id>`**
+  (`sat-agent/distro-arch`), one commit created from the port's base commit and merged into the
+  port branch, so it can be reviewed and upstreamed independently of any release:
+  - its name → two-letter code in `distrib.pyconf` (a derivative: its parent's code);
+  - its version rule in `get_distrib_version` (`elif distrib in ["AR"]: version=""`,
+    `major.minor` for `AL`; `major` is sat's default);
+  - its package manager: a dnf/zypper distribution joins the rpm list of `get_pkg_check_cmd`;
+    a manager sat does not know gets its check command there (`pacman -T`, `apk info -e`,
+    `xbps-query`...: check_cmd = `[<key>, <command>...]`), its branch in `check_system_pkgs`,
+    and the `system_info.<key>/<key>_dev` keys in `check_system_dep`.
+
+  No existing platform reaches the new code.
 
 ---
 
@@ -252,6 +297,7 @@ Key settings (`config.example.json`):
 | `docker.run_as_host_user` | sat runs with your uid (files stay yours); package installs run as root |
 | `web_search.backend` | `duckduckgo` (no key), `searxng` (+`searxng_url`), `tavily` (+key), `none` |
 | `tests.*` | ctest arguments, `include`/`exclude` regexes, Xvfb |
+| `policy.unmapped_native` | `--batch`, native product without a package on a new package manager: `embed` (default), `none`, `remove` |
 | `policy.*` | attempts per failure, LLM turns, test cycles, `on_failure` (`abort`/`skip`) in batch mode, timeouts |
 
 Staged runs: `--until sysdeps` / `--until prepare` stop after that phase; `--no-tests` stops

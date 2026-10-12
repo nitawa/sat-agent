@@ -25,6 +25,7 @@ def build_agent_graph():
     g = StateGraph(PortState)
     g.add_node("entry", build.entry)
     g.add_node("setup_platform", build.setup_platform)
+    g.add_node("native_choices", build.native_choices)
     g.add_node("apply_guidance", build.apply_guidance)
     g.add_node("system_deps", build.system_deps)
     g.add_node("prepare", build.prepare)

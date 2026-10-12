@@ -64,6 +64,9 @@ DEFAULT_CONFIG: dict = {
         "agent_iteration_cap": 30,    # LLM turns per fixer invocation
         "max_test_cycles": 3,         # build <-> test feedback rounds
         "on_failure": "abort",       # batch mode: abort | skip (skip = rm_products for the new platform)
+        # batch mode, native product without a package on the new platform:
+        # embed (build it from sources there) | none (native, no package) | remove (rm_products)
+        "unmapped_native": "embed",
         "command_timeout_s": 3600,
         "compile_timeout_s": 12 * 3600,
     },

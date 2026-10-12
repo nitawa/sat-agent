@@ -18,13 +18,14 @@ import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sat_agent import distro_support
 from sat_agent import git_workspace as gw
 from sat_agent import pyconf_edit as pe
 from sat_agent import sat_capabilities
 from sat_agent.docker_env import DockerEnv, DockerError, DockerfileSpec, _run, image_os_release
 from sat_agent.guard import check_sat_salome
 from sat_agent.logs import log
-from sat_agent.platform import SAT_DIST_CODES, OSRelease, PkgFamily, family_for, section_suffix
+from sat_agent.platform import SAT_DIST_CODES, OSRelease, PkgFamily, detect_family, family_for, section_suffix
 from sat_agent.sat_runner import SatRunner
 
 _DETECT = r"""
@@ -35,6 +36,7 @@ codes = dict(re.findall(r'^\s*"([^"]+)"\s*:\s*"([^"]+)"',
              open(sys.argv[1] + '/src/internal_config/distrib.pyconf').read(), re.M))
 name = a.linux_distribution()[0]
 print('NAME=' + name)
+print('VERSION=' + a.linux_distribution()[1])
 for k, v in codes.items():
     if k in name.lower():
         print('DIST=' + v + a.get_distrib_version(v))
@@ -198,16 +200,25 @@ class GuardViolation(RuntimeError):
         self.violations = violations
 
 
-def detect_dist(image: str, sat_upstream: Path, osr: OSRelease) -> tuple[str, str, bool]:
-    """(dist code, distribution name, known to sat)."""
-    fallback = SAT_DIST_CODES.get(osr.id) or next((SAT_DIST_CODES[i] for i in osr.id_like if i in SAT_DIST_CODES), "")
+def detect_dist(image: str, sat_upstream: Path, osr: OSRelease, plan=None) -> tuple[str, str, bool]:
+    """(dist code, distribution name, known to sat). plan: distro_support.DistroPlan of a
+    distribution sat does not know (its code and version rule)."""
+    fallback = plan.code if plan is not None else \
+        SAT_DIST_CODES.get(osr.id) or next((SAT_DIST_CODES[i] for i in osr.id_like if i in SAT_DIST_CODES), "")
     args = ["docker", "run", "--rm", "-v", f"{sat_upstream}:/opt/sat-ro:ro", "--entrypoint", "python3", image,
             "-B", "-c", _DETECT, "/opt/sat-ro"] + ([fallback] if fallback else [])
     r = _run(args, timeout=600)
-    vals = dict(re.findall(r"^(NAME|DIST|FALLBACK)=(.*)$", r.output, re.MULTILINE))
+    vals = dict(re.findall(r"^(NAME|DIST|FALLBACK|VERSION)=(.*)$", r.output, re.MULTILINE))
     if "DIST" in vals:
         return vals["DIST"].strip(), vals.get("NAME", ""), True
+    if plan is not None and (not plan.derivative_of or plan.version_rule):
+        # a new code, or the derivative of one (its rule is in the plan, not in upstream sat)
+        return plan.dist(vals.get("VERSION", "").strip()), vals.get("NAME", osr.id), False
     if "FALLBACK" in vals:
+        if osr.rolling and plan is None:
+            # VERSION_ID of a rolling release is the date of the image: the platform is the code
+            # alone (AR), as sat_capabilities teaches sat (get_distrib_version)
+            return fallback, vals.get("NAME", osr.id), False
         return vals["FALLBACK"].strip(), vals.get("NAME", osr.id), False
     raise DockerError(f"cannot determine the sat platform code of {image}:\n{r.output[-2000:]}")
 
@@ -225,7 +236,23 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
 
     log.info("target image %s", image)
     osr = OSRelease.parse(image_os_release(image))
-    family = family_for(osr)
+    plan = None
+    if osr.name and not distro_support.sat_knows(sat_capabilities.known_distributions(sat_up), osr.name):
+        # sat would stop on this distribution: decide its code, version rule and package manager
+        # (image, web, LLM), written into sat on a dedicated branch below
+        plan = distro_support.plan_support(image, osr, sat_capabilities.known_distributions(sat_up), llm, web,
+                                           work_root / "distros")
+        family = plan.family_obj()
+    else:
+        try:
+            family = family_for(osr)
+        except ValueError:
+            # unknown os-release ID: look for the package manager installed in the image
+            family = detect_family(lambda cmd: _run(["docker", "run", "--rm", "--entrypoint", "sh", image, "-c",
+                                                     cmd], timeout=600).ok)
+            if family is None:
+                raise
+            log.info("  %s: package manager found in the image: %s", osr.pretty_name or osr.id, family.name)
     log.info("  %s -> package family %s (sat reads system_info.%s/%s)", osr.pretty_name, family.name,
              *family.sat_keys)
 
@@ -241,7 +268,7 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
     if not r.ok:
         raise DockerError(f"bootstrap image build failed, see {boot_dir / 'build.log'}:\n{r.output[-3000:]}")
 
-    dist, distro_name, known = detect_dist(boot_tag, sat_up, osr)
+    dist, distro_name, known = detect_dist(boot_tag, sat_up, osr, plan)
     log.info("  sat platform code: %s%s", dist, "" if known else f" (distribution {distro_name!r} unknown to sat)")
 
     port_dir = work_root / "ports" / dist
@@ -263,8 +290,13 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
     sat_dir, sat_base = gw.prepare_checkout(sat_up, branch, mode, port_dir / "sat", existing=existing)
     sal_dir, sal_base = gw.prepare_checkout(sal_up, branch, mode, port_dir / "sat_salome", existing=existing)
 
+    # a distribution sat does not know: its support, on a dedicated branch merged into the port's
+    if plan is not None:
+        sat_capabilities.ensure_distribution_support(sat_up, sat_dir, plan, sat_base, port_dir,
+                                                     prefix=cfg["git"].get("branch_prefix", "sat-agent/"))
+
     # sat upgrades needed by every port (idempotent, see sat_capabilities)
-    if not known:
+    if not known and plan is None:
         code = re.match(r"[A-Z]+", dist).group(0)
         sat_capabilities.ensure_distribution(sat_dir, distro_name.lower(), code)
     sat_capabilities.ensure_system_info_exclusions(sat_dir)
@@ -311,10 +343,7 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
 
     # a recreated container lost the packages installed live: reinstall them
     if spec.packages:
-        missing = env.exec("rpm -q " + " ".join(shlex.quote(p) for p in spec.packages) + " >/dev/null 2>&1"
-                           if family.name != "apt" else
-                           "dpkg -s " + " ".join(shlex.quote(p) for p in spec.packages) + " >/dev/null 2>&1",
-                           root=True, timeout=600)
+        missing = env.exec(family.all_installed_cmd(spec.packages), root=True, timeout=600)
         if not missing.ok:
             env.exec(family.refresh_cmd(), root=True, timeout=1800)
             ctx.install_packages(spec.packages, "restore container")

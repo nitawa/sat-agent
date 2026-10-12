@@ -64,6 +64,14 @@ No lint config; `python -m pyflakes sat_agent` is used to keep imports clean.
 - Platform codes: `VARS.dist` = distrib code (`src/internal_config/distrib.pyconf`, substring of
   `distro.linux_distribution()[0].lower()`) + `get_distrib_version` (UB keeps `major.minor`, DB
   pads to 2 digits, others major only). `sat config -v VARS.dist` prints `dist: UB24.04`.
+- Upstream sat checks packages with dpkg/apt or rpm only (`src/system.py: get_pkg_check_cmd`, by
+  dist code: codes outside its rpm list use dpkg). A distribution sat does not know is planned by
+  `distro_support.plan_support` (derivative → parent's code; else a new two-letter code, version
+  rule, package manager found in the image or described by the LLM and validated there) and written
+  by `sat_capabilities.add_distribution_support` on the dedicated branch `sat-agent/distro-<id>`
+  (merged into the port branch). New managers: check_cmd = `[<system_info key>, <command>...]`.
+  Verified in archlinux (pacman -T, follows provides), alpine (apk info -e), void-glibc (xbps-query).
+  Their ports translate the reference's rpm names (`sysdeps.translate_declarations`).
 - `src/product.py: check_system_dep` merges generic `system_info.apt/apt_dev` (or `rpm/rpm_dev`)
   with the block whose key contains the dist (`"UB26.04"`). sat-agent adds
   `<apt|rpm>_exclude` support there (`sat_capabilities.py`, anchored on the
