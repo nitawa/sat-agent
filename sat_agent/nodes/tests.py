@@ -106,7 +106,8 @@ def analyze(state, config):
                or "- none"))
     outcome = run_agent(ctx.llm, system, task, make_common_tools(ctx) + session.tools(),
                         ctx.cfg["policy"]["agent_iteration_cap"] * 2, name="tests",
-                        transcript=ctx.logs_dir / "agents" / f"tests-cycle{state['tests']['cycle']}.json")
+                        transcript=ctx.logs_dir / "agents" / f"tests-cycle{state['tests']['cycle']}.json",
+                        memory_cfg=ctx.cfg.get("memory"))
     reported = {t for rep in session.reports for t in rep["tests"]}
     rest = [t.name for t in res.failed if t.name not in reported]
     if rest:

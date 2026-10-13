@@ -1,6 +1,7 @@
 """Final node: export the platform Dockerfile, check the non-regression
 guard, commit, and write the port report."""
 
+import json
 import time
 
 from langgraph.graph import END
@@ -9,6 +10,7 @@ from langgraph.types import Command
 from sat_agent import git_workspace as gw
 from sat_agent.context import GuardViolation
 from sat_agent.guard import sat_changes
+from sat_agent.llm import run_usage
 from sat_agent.logs import log
 from sat_agent.parsers import parse_check_system
 
@@ -53,8 +55,36 @@ def finalize(state, config):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report, encoding="utf-8")
     (ctx.port_dir / "REPORT.md").write_text(report, encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps(run_summary(ctx, state), indent=1), encoding="utf-8")
     log.info("report: %s", path)
     return Command(update={"report_path": str(path)}, goto=END)
+
+
+def run_summary(ctx, state) -> dict:
+    """Outcome and LLM usage of the run, read by `sat-agent bench` (reports/<run_id>.json)."""
+    results = (state.get("tests") or {}).get("results") or {}
+    return {"run_id": state.get("run_id"), "dist": ctx.dist, "app": ctx.app, "image": ctx.image,
+            "build_status": state.get("build_status"), "fixes": len(state.get("fixes") or []),
+            "gave_up": len(state.get("gave_up") or []), "skipped": list(state.get("skipped") or []),
+            "tests": {"total": len(results),
+                      "failed": sum(1 for s in results.values() if s not in ("passed", "skipped")),
+                      "cycles": (state.get("tests") or {}).get("cycle", 0)},
+            "llm": run_usage(getattr(ctx, "llm", None))}
+
+
+def usage_lines(usage: dict) -> list[str]:
+    """Markdown table of a run's LLM usage, per model then per phase."""
+    lines = ["| model / phase | calls | input tokens | cached | output tokens | reasoning | LLM time |",
+             "|---|---:|---:|---:|---:|---:|---:|"]
+    row = lambda name, c: (f"| {name} | {c['calls']} | {c['prompt_tokens']} | {c.get('cached_tokens', 0)} | "  # noqa: E731
+                           f"{c['completion_tokens']} | {c.get('reasoning_tokens', 0)} | {c.get('seconds', 0):.0f}s |")
+    for model, u in usage.items():
+        lines.append(row(f"**{model}**", u))
+        for ph, c in sorted((u.get("by_phase") or {}).items(), key=lambda kv: -kv[1]["prompt_tokens"]):
+            lines.append(row(ph, c))
+    if any(u.get("calls_without_usage") for u in usage.values()):
+        lines += ["", "Some calls returned no token usage (not counted)."]
+    return lines
 
 
 def render_report(ctx, state, verify: str, violations: list[str], commit_error: str | None) -> str:
@@ -106,11 +136,10 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
         if req.recommendations:
             lines += ["Instructions given to the agents:", ""] + [f"- {r}" for r in req.recommendations]
         lines += [f"- ({n})" for n in req.notes]
-    u = getattr(getattr(ctx, "llm", None), "usage", None)
-    if u and u.get("calls"):
-        lines += ["", "## LLM usage", "",
-                  f"{u['calls']} call(s), {u['prompt_tokens']} input + {u['completion_tokens']} output tokens "
-                  "(this process; a --resume counts from zero)."]
+    usage = run_usage(getattr(ctx, "llm", None))
+    if usage:
+        lines += ["", "## LLM usage", "", "Whole run, resumptions included (`llm_usage.json`).", ""]
+        lines += usage_lines(usage)
     lines += ["", "## Fixes applied by the build agent", ""]
     for f in state.get("fixes") or []:
         lines.append(f"### {f.get('phase')} — {f.get('product') or 'platform'}")

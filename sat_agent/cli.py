@@ -8,6 +8,8 @@
     sat-agent port fedora:45 --trace         # + full trace of steps, LLM messages and tool calls
     sat-agent guard FD45                     # re-check the non-regression guard of a port
     sat-agent -w /data/sat-agent port fedora:45   # another working directory than the config's
+    sat-agent -w ~/bench/qwen3-32b port fedora:45 --batch --model qwen3:32b   # another model
+    sat-agent bench ~/bench/*                # compare the token usage of those runs
 """
 
 import argparse
@@ -28,6 +30,10 @@ def get_config(args) -> dict:
     if getattr(args, "work_root", None):
         # relative to where the command is run, not to the config file
         cfg["paths"]["work_root"] = str(Path(args.work_root).expanduser().resolve())
+    if getattr(args, "model", None):
+        cfg["llm"]["model"] = args.model
+    if getattr(args, "llm_base_url", None):
+        cfg["llm"]["base_url"] = args.llm_base_url
     return cfg
 
 
@@ -201,7 +207,7 @@ def cmd_port(args) -> int:
     from sat_agent.context import open_port
     from sat_agent.git_workspace import BranchInUse
     from sat_agent.graph import build_graph
-    from sat_agent.llm import LLMClient
+    from sat_agent.llm import LLMClient, run_usage
     from sat_agent.state import initial_state
     from sat_agent.tools.web import Web
     from sat_agent.docker_env import docker_available
@@ -248,6 +254,8 @@ def cmd_port(args) -> int:
         thread = f"{ctx.dist}-{time.strftime('%Y%m%d-%H%M%S')}"
         inp = initial_state(thread, ctx.dist, args.batch, stop_after=req.stop_after)
         last.write_text(thread)
+    if llm is not None:
+        llm.persist_usage(ctx.port_dir / "llm_usage.json", thread)
     config = {"configurable": {"thread_id": thread, "ctx": ctx}, "recursion_limit": 1000}
     try:
         final = drive(app, inp, config)
@@ -260,10 +268,9 @@ def cmd_port(args) -> int:
     failed = [n for n, s in ((final.get("tests") or {}).get("results") or {}).items()
               if s not in ("passed", "skipped")]
     log.info("build %s, %d failing test(s); report %s", status, len(failed), final.get("report_path"))
-    if ctx.llm is not None:
-        u = ctx.llm.usage
-        log.info("LLM: %d call(s), %d input + %d output tokens", u["calls"], u["prompt_tokens"],
-                 u["completion_tokens"])
+    for model, u in run_usage(ctx.llm).items():
+        log.info("LLM %s: %d call(s), %d input + %d output tokens (%d reasoning), %.0fs (whole run)", model,
+                 u["calls"], u["prompt_tokens"], u["completion_tokens"], u["reasoning_tokens"], u["seconds"])
     return 0 if status == "ok" and not failed else 1
 
 
@@ -281,6 +288,17 @@ def cmd_guard(args) -> int:
         print(e)
     print("OK: no change affects another platform" if not errs else f"{len(errs)} violation(s)")
     return 1 if errs else 0
+
+
+def cmd_bench(args) -> int:
+    from sat_agent import bench
+
+    rows = [r for root in args.roots for r in bench.collect(Path(root).expanduser())]
+    if not rows:
+        log.error("no llm_usage.json under %s", ", ".join(args.roots))
+        return 2
+    print(json.dumps(rows, indent=1) if args.json else bench.render(rows, by_phase=args.by_phase))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -319,6 +337,15 @@ def main(argv=None) -> int:
     pp.add_argument("--trace-file", metavar="FILE", help="like --trace, to FILE")
     pp.add_argument("--verify-dockerfile", action="store_true",
                     help="rebuild the exported Dockerfile from scratch at the end and re-check it")
+    pp.add_argument("--model", help="LLM model (overrides llm.model of the config file)")
+    pp.add_argument("--llm-base-url", metavar="URL",
+                    help="OpenAI-compatible endpoint (overrides llm.base_url of the config file)")
+    pb = sub.add_parser("bench", help="compare the LLM token usage of runs (one work root or port directory "
+                                      "per model)")
+    pb.add_argument("roots", nargs="+", metavar="DIR", help="work roots (-w of the runs) or port directories")
+    pb.add_argument("--by-phase", action="store_true", help="also detail each run by phase (prompt, sysdeps, "
+                                                            "build:<product>, tests...)")
+    pb.add_argument("--json", action="store_true", help="machine-readable output")
     pg = sub.add_parser("guard", help="check that a port does not change any other platform")
     pg.add_argument("dist", help="platform code, e.g. FD45")
     for sp in (pp, pg):      # also accepted after the command: sat-agent port fedora:45 -w DIR
@@ -329,7 +356,7 @@ def main(argv=None) -> int:
     cfg_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(args.verbose, str(cfg_dir / "sat-agent.log"))
     try:
-        return cmd_port(args) if args.cmd == "port" else cmd_guard(args)
+        return {"port": cmd_port, "guard": cmd_guard, "bench": cmd_bench}[args.cmd](args)
     except Exception as e:  # noqa: BLE001 — one clean line instead of a traceback
         log.debug("fatal", exc_info=True)
         log.error("%s: %s", type(e).__name__, e)

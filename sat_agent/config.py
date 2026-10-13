@@ -57,6 +57,13 @@ DEFAULT_CONFIG: dict = {
         "enabled": False,
         "file": "",                  # empty = <work_root>/traces/trace-<date>.log
     },
+    # Compaction of the agents' conversations (sat_agent/agents/memory.py); history_high 0 = never.
+    "memory": {
+        "history_high": 60_000,      # characters of conversation that trigger a compaction
+        "history_low": 25_000,       # size a compaction aims at (done in one go: keeps prefix caching useful)
+        "keep_turns": 3,             # last turns kept verbatim
+        "strip_think": True,         # do not resend the <think> blocks of earlier turns
+    },
     "policy": {
         "sysdeps_passes": 4,
         "prepare_fix_attempts": 3,

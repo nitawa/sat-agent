@@ -1,7 +1,7 @@
 {
   "llm": {
     "base_url": "http://localhost:11434/v1",
-    "api_key": ""
+    "api_key": "",
     "model": "deepseek-v4.1-flash:cloud",
     "ssl_cert_file": "",
     "temperature": 0.0,
@@ -45,6 +45,12 @@
   "trace": {
     "enabled": false,
     "file": ""
+  },
+  "memory": {
+    "history_high": 60000,
+    "history_low": 25000,
+    "keep_turns": 3,
+    "strip_think": true
   },
   "policy": {
     "sysdeps_passes": 4,

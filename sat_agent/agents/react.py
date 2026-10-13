@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from sat_agent.llm import caller
+from sat_agent.agents import memory
+from sat_agent.llm import _strip_think, caller
 from sat_agent.logs import log
-from sat_agent.trace import tracer
+from sat_agent.trace import render_messages, tracer
 
 MAX_TOOL_OUTPUT = 9000
-HISTORY_BUDGET = 160_000      # characters kept verbatim; older tool outputs are shortened
 
 
 @dataclass
@@ -50,17 +50,6 @@ S = {"type": "string"}
 I = {"type": "integer"}
 B = {"type": "boolean"}
 LS = {"type": "array", "items": {"type": "string"}}
-
-
-def _shorten_history(messages: list[dict]) -> None:
-    total = sum(len(str(m.get("content") or "")) for m in messages)
-    for m in messages[2:-6]:
-        if total <= HISTORY_BUDGET:
-            break
-        c = m.get("content")
-        if m.get("role") in ("tool", "user") and isinstance(c, str) and len(c) > 800:
-            total -= len(c) - 600
-            m["content"] = c[:600] + "\n[... older output shortened ...]"
 
 
 def _as_list(v) -> list:
@@ -126,8 +115,10 @@ def _save(transcript: Path | None, messages: list[dict], outcome: dict) -> None:
 
 
 def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: str = "agent",
-              transcript: Path | None = None) -> dict:
-    """Returns the terminal tool's outcome dict, or {"status": "give_up", ...}."""
+              transcript: Path | None = None, memory_cfg: dict | None = None) -> dict:
+    """Returns the terminal tool's outcome dict, or {"status": "give_up", ...}.
+    memory_cfg: the config's `memory` section (history compaction, see agents/memory.py)."""
+    mem = memory.settings(memory_cfg)
     by_name = {t.name: t for t in tools}
     schemas = [t.schema() for t in tools]
     terminal = next((t for t in tools if t.terminal), None)
@@ -142,7 +133,7 @@ def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: st
                              f"Only {cap - turn + 1} turns left. Apply the fix your investigation points to now, "
                              "then call `finish`; if you have no fix, call `finish` with status give_up and "
                              "your diagnosis so far (what fails, why, what you found on the web)."})
-        outcome = _turn(llm, messages, schemas, by_name, seen, turn, name)
+        outcome = _turn(llm, messages, schemas, by_name, seen, turn, name, mem)
         if isinstance(outcome, dict):
             break
         if outcome == "no_call":
@@ -166,7 +157,8 @@ def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: st
                          "applied a fix, with a summary of your diagnosis (first error, its cause, what you "
                          "found on the web, what you would try next)."})
         try:
-            outcome = _turn(llm, messages, [terminal.schema()], {terminal.name: terminal}, {}, cap + 1, name)
+            outcome = _turn(llm, messages, [terminal.schema()], {terminal.name: terminal}, {}, cap + 1, name,
+                            mem)
         except Exception as e:  # noqa: BLE001
             log.debug("final turn failed: %s", e)
     if not isinstance(outcome, dict):
@@ -175,9 +167,25 @@ def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: st
     return outcome
 
 
-def _turn(llm, messages, schemas, by_name, seen, turn, name):
+def _report_compaction(who: str, messages: list[dict], comp) -> None:
+    """Says clearly that the memory was compacted: summary in the log, the whole memory before and
+    after in the trace (and in the log with -v)."""
+    log.info("  [%s] MEMORY COMPACTED: %d -> %d characters, %d message(s) shortened", who, comp.before,
+             comp.after, len(comp.changes))
+    for c in comp.changes:
+        log.info("    #%d %s%s: %d -> %d chars", c["index"], c["role"], " " + c["tool"] if c["tool"] else "",
+                 len(c["old"]), len(c["new"]))
+    before = comp.memory_before(messages)
+    tracer.compaction(who, before, messages, comp)
+    log.debug("  [%s] memory before compaction:\n%s", who, render_messages(before))
+    log.debug("  [%s] memory after compaction:\n%s", who, render_messages(messages))
+
+
+def _turn(llm, messages, schemas, by_name, seen, turn, name, mem=memory.DEFAULTS):
     """One model turn. Returns the terminal outcome dict, "no_call", "repeat" or None."""
-    _shorten_history(messages)
+    comp = memory.compact_history(messages, mem)
+    if comp:
+        _report_compaction(f"{name} {turn}", messages, comp)
     with caller(f"{name} {turn}"):
         out = llm.chat(messages, tools=schemas)
     calls = out["tool_calls"]
@@ -188,7 +196,8 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name):
         return "no_call"
     native = bool(out["raw"].get("tool_calls"))
     if native:
-        messages.append({"role": "assistant", "content": out["raw"].get("content") or "",
+        content = out["raw"].get("content") or ""
+        messages.append({"role": "assistant", "content": _strip_think(content) if mem["strip_think"] else content,
                          "tool_calls": [{"id": c["id"], "type": "function",
                                          "function": {"name": c["name"],
                                                       "arguments": json.dumps(c["arguments"])}}

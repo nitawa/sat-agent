@@ -55,6 +55,15 @@ No lint config; `python -m pyflakes sat_agent` is used to keep imports clean.
   cleaned of lone surrogates (`react.clean_text`) before being stored or sent.
 - Tests: `salome test` needs KERNEL; without it (MEDCOUPLING) `nodes/tests.launcher` runs
   `sat environ` and the tests run with ctest in `INSTALL/*/bin/salome/test` (`state.tests.dirs`).
+- Token usage: `LLMClient` counts per phase (`llm.phase_of` of the `caller` label) and, once
+  `persist_usage` is called (cmd_port, after the thread is known), saves `{run_id: {model: usage}}`
+  in `ports/<DIST>/llm_usage.json` after every call; finalize writes `reports/<run_id>.json`
+  (`run_summary`), and `sat-agent bench` (`bench.py`) compares work roots from those two files.
+- Agent memory: `agents/memory.compact_history` runs before each turn of `run_agent`
+  (`memory_cfg` = config `memory`): past `history_high` it compacts old outputs in one go down to
+  `history_low` (prefix caching stays valid between compactions); it only rewrites `content`,
+  never removes messages (tool-call/tool-result pairing must stay valid for the API). The
+  `<think>` part of native tool-call answers is stripped from the history (`strip_think`).
 - The fixer/test agents are `agents/react.run_agent` loops over `tools/*` with a terminal
   `finish` tool. Small local models often emit tool calls as JSON text: `llm.text_tool_calls`
   recovers them.

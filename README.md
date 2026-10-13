@@ -273,8 +273,52 @@ the fixer: prefer a strong model (e.g. a 30B+ coder model) over a small one.
 
 Every LLM call logs its tokens, named after the agent and turn that made it:
 `[build:compile 3] LLM call 42: 18234 in + 312 out tokens (4.1s) | total 512340 in + 9876 out`
-(from the `usage` field of the response; servers that omit it are reported as such). The totals are
-printed at the end of the run and written to the report (they restart from zero on `--resume`).
+(from the `usage` field of the response; servers that omit it are reported as such). The totals —
+calls, input, output and reasoning tokens, LLM time, overall and per phase (`prompt`, `distro`,
+`sysdeps`, `build:guidance`, `build:<product>`, `tests`) — are kept per run and per model in
+`ports/<DIST>/llm_usage.json`, updated after every call (a `--resume` adds to them), printed at the
+end of the run and written to the report; `reports/<run_id>.json` adds the run's outcome.
+
+### Comparing models
+
+`--model` and `--llm-base-url` override the config's `llm` section. Run the same port with each
+model from the same starting point — its own work root, `--batch`, same image, prompt and policy
+(a re-run in the same work root reuses the fixes already made and costs far less) — then compare:
+
+```bash
+for m in qwen3:8b qwen3:32b gpt-oss:20b; do
+  sat-agent --config config.sat.json -w ~/bench/${m//:/-} port fedora:45 --batch --new-branch --model $m
+done
+sat-agent bench ~/bench/*              # one line per run, most input tokens first
+sat-agent bench ~/bench/* --by-phase   # + where the tokens went; --json for scripts
+```
+
+`bench` shows calls, tokens, LLM time, build status, fixes, gave-ups, skipped products, failing
+tests and tokens per applied fix: a model that spends few tokens because it gives up early is not
+the cheaper one. `--until sysdeps` / `--until prepare` give shorter benchmarks. The `cached`
+column counts the input tokens the server served from its prefix cache
+(`usage.prompt_tokens_details.cached_tokens`; vLLM: `--enable-prefix-caching
+--enable-prompt-tokens-details`; Ollama does not report it).
+
+### Agent memory (history compaction)
+
+Each agent turn sends the whole conversation again, so an old tool output is paid at every
+following turn. `sat_agent/agents/memory.py` keeps it bounded (config section `memory`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `history_high` | 60000 | conversation size (characters) that triggers a compaction; `0` = never |
+| `history_low` | 25000 | size a compaction aims at, in one go — between two compactions the conversation only grows, so the server's cached prefix stays valid |
+| `keep_turns` | 3 | last turns kept verbatim (with the system prompt and the task) |
+| `strip_think` | true | the `<think>` blocks of earlier turns are not sent again |
+
+Old outputs keep what the investigation needs: error lines, first line and tail of logs and
+commands, titles and URLs of web results, a mention of files and pages already read; outputs
+still too big become one-line stubs. Every compaction is reported: `MEMORY COMPACTED: <before> ->
+<after> characters` and the size of each shortened message in the log; with `--trace`, a
+`[memory]` entry holds the whole conversation **before** and **after** the compaction (also in the
+log with `-v`). Compare settings with `sat-agent bench` (tokens *and*
+fixes: a too aggressive compaction makes the agent re-read or give up).
 
 `--trace` (or `--trace-file FILE`, or `trace.enabled` in the config) writes a full, chronological
 trace to `<work_root>/traces/trace-<date>.log`: every graph step with its state update, every

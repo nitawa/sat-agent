@@ -205,7 +205,7 @@ def apply_guidance(state, config):
     task = prompts.GUIDANCE_TASK.format(dist=ctx.dist, ref=ref or "nothing")
     outcome = run_agent(ctx.llm, system, task, make_common_tools(ctx) + session.tools(upfront=True),
                         _policy(ctx)["agent_iteration_cap"], name="build:guidance",
-                        transcript=_transcript(ctx, "guidance"))
+                        transcript=_transcript(ctx, "guidance"), memory_cfg=ctx.cfg.get("memory"))
     record = {"key": "guidance:None", "phase": "guidance", "product": None, "status": outcome.get("status"),
               "summary": outcome.get("summary", "")}
     _keep_in_scope(ctx, session, record)
@@ -481,7 +481,8 @@ def fix(state, config):
     system = prompts.fmt(prompts.BUILD_SYSTEM, ctx, ref, state.get("platforms") or [])
     outcome = run_agent(ctx.llm, system, _task(ctx, state, failure),
                         make_common_tools(ctx) + session.tools(), _policy(ctx)["agent_iteration_cap"],
-                        name=f"build:{product or phase}", transcript=_transcript(ctx, f"{phase}-{product}"))
+                        name=f"build:{product or phase}", transcript=_transcript(ctx, f"{phase}-{product}"),
+                        memory_cfg=ctx.cfg.get("memory"))
     record = {"key": key, "phase": phase, "product": product, "status": outcome.get("status"),
               "summary": outcome.get("summary", ""), "actions": [], "patches": [], "packages": []}
     if outcome.get("status") == "fixed":

@@ -13,7 +13,7 @@ chronological order, in full (no truncation):
 
 The agents' end-of-run transcripts (logs/agents/*.json) keep only the final conversation of one
 agent; the trace is the whole run, including one-shot calls (request interpretation, package
-choice) and the history before `_shorten_history` shortened it.
+choice) and the history before `agents/memory.py` compacted it.
 """
 
 import hashlib
@@ -29,6 +29,22 @@ def _dump(obj) -> str:
 
 def _text(s) -> str:
     return str(s).encode("utf-8", errors="replace").decode("utf-8")
+
+
+def render_messages(messages: list[dict], names: dict | None = None) -> str:
+    """Every message of a conversation, numbered, in full (tool outputs named after their tool)."""
+    names = names or {tc.get("id"): (tc.get("function") or {}).get("name")
+                      for m in messages for tc in m.get("tool_calls") or []}
+    parts = []
+    for i, m in enumerate(messages):
+        c = str(m.get("content") or "")
+        tool = f" {names.get(m['tool_call_id'])} (tool_call_id {m['tool_call_id']})" if m.get("tool_call_id") else ""
+        parts.append(f"--- #{i} {m.get('role')}{tool}: {len(c)} chars")
+        if c:
+            parts.append(c)
+        if m.get("tool_calls"):
+            parts.append("tool_calls: " + _dump(m["tool_calls"]))
+    return "\n".join(parts)
 
 
 class Tracer:
@@ -122,6 +138,22 @@ class Tracer:
 
     def llm_error(self, who: str, n: int, error: Exception) -> None:
         self._write("llm-error", f"[{who}] #{n}", f"{type(error).__name__}: {error}")
+
+    # ------------------------------------------------------------- memory
+    def compaction(self, who: str, before: list[dict], after: list[dict], comp) -> None:
+        """A compaction of an agent's conversation: what changed, then the whole memory before and after."""
+        if not self.enabled:
+            return
+        summary = [f"{len(comp.changes)} of {len(after)} message(s) compacted:"]
+        summary += [f"  #{c['index']} {c['role']}{' ' + c['tool'] if c['tool'] else ''}: "
+                    f"{len(c['old'])} -> {len(c['new'])} chars" for c in comp.changes]
+        bar = "#" * 30
+        self._write("memory", f"[{who}] MEMORY COMPACTED: {comp.before} -> {comp.after} characters "
+                    f"(-{100 - 100 * comp.after // max(comp.before, 1)}%)", "\n".join([
+                        *summary, "",
+                        f"{bar} MEMORY BEFORE COMPACTION ({comp.before} chars) {bar}", render_messages(before), "",
+                        f"{bar} MEMORY AFTER COMPACTION ({comp.after} chars) {bar}", render_messages(after),
+                        f"{bar} END OF COMPACTION {bar}"]))
 
     # ------------------------------------------------------------- tools
     def tool(self, who: str, name: str, args: dict, result, seconds: float | None = None, note: str = "",

@@ -8,10 +8,12 @@ error the graph reports.
 
 import contextvars
 import json
+import os
 import re
 import time
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
 import requests
 
@@ -34,6 +36,56 @@ def caller(label: str):
 
 class LLMError(RuntimeError):
     pass
+
+
+COUNTERS = ("calls", "prompt_tokens", "cached_tokens", "completion_tokens", "reasoning_tokens", "seconds",
+            "calls_without_usage")
+
+
+def empty_usage() -> dict:
+    return {**{k: 0 for k in COUNTERS}, "seconds": 0.0, "by_phase": {}}
+
+
+def phase_of(label: str) -> str:
+    """Groups the call labels of the token log: "build:GEOM 7" -> "build:GEOM",
+    "sysdeps translate rpm->pacman" -> "sysdeps", "tests 3" -> "tests"."""
+    return (label.split() or ["llm"])[0]
+
+
+def add_usage(a: dict, b: dict) -> dict:
+    """Sum of two usage dicts (totals and per-phase counters)."""
+    out = empty_usage()
+    for u in (a or {}, b or {}):
+        for k in COUNTERS:
+            out[k] += u.get(k, 0) or 0
+        for ph, c in (u.get("by_phase") or {}).items():
+            dst = out["by_phase"].setdefault(ph, {k: 0 for k in COUNTERS})
+            for k in COUNTERS:
+                dst[k] += c.get(k, 0) or 0
+    out["seconds"] = round(out["seconds"], 1)
+    for c in out["by_phase"].values():
+        c["seconds"] = round(c["seconds"], 1)
+    return out
+
+
+def load_usage_file(path: Path) -> dict:
+    """{run_id: {model: usage}} saved by LLMClient.persist_usage ({} if absent or unreadable)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def run_usage(llm) -> dict:
+    """{model: usage} of the current run: the persisted totals when the client keeps a usage
+    file (so a --resume and a model change are included), else this process's usage."""
+    if llm is None:
+        return {}
+    if hasattr(llm, "run_usage"):
+        return llm.run_usage()
+    u = getattr(llm, "usage", None)
+    return {getattr(llm, "model", "llm"): u} if u and u.get("calls") else {}
 
 
 def _strip_think(text: str | None) -> str:
@@ -85,7 +137,36 @@ class LLMClient:
         self.extra_headers = cfg.get("extra_headers") or {}
         self.extra_body = cfg.get("extra_body") or {}
         self.verify = cfg.get("ssl_cert_file") or True
-        self.usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+        self.usage = empty_usage()      # this process
+        self._usage_file: Path | None = None
+        self._run_id = ""
+        self._baseline = empty_usage()  # same run and model, from earlier processes (--resume)
+
+    def persist_usage(self, path: Path, run_id: str) -> None:
+        """Keeps the run's token usage in `path` ({run_id: {model: usage}}), updated after every
+        call: a --resume adds to the saved totals instead of counting from zero."""
+        self._usage_file, self._run_id = Path(path), run_id
+        self._baseline = load_usage_file(self._usage_file).get(run_id, {}).get(self.model) or empty_usage()
+        self._save_usage()
+
+    def run_usage(self) -> dict:
+        """{model: usage} of the run (every model used by it), this process included."""
+        if self._usage_file is None:
+            return {self.model: add_usage(self.usage, {})} if self.usage["calls"] else {}
+        return dict(load_usage_file(self._usage_file).get(self._run_id) or {})
+
+    def _save_usage(self) -> None:
+        if self._usage_file is None:
+            return
+        data = load_usage_file(self._usage_file)
+        data.setdefault(self._run_id, {})[self.model] = add_usage(self._baseline, self.usage)
+        tmp = self._usage_file.with_suffix(".tmp")
+        try:
+            self._usage_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+            os.replace(tmp, self._usage_file)
+        except OSError as e:
+            log.debug("could not save the LLM usage: %s", e)
 
     def _post(self, payload: dict) -> dict:
         headers = {"Content-Type": "application/json", **self.extra_headers}
@@ -148,19 +229,30 @@ class LLMClient:
         return {"content": _strip_think(content), "tool_calls": calls, "raw": msg}
 
     def _count(self, u: dict, seconds: float) -> None:
-        """Logs the tokens of one call and adds them to the run's totals."""
-        self.usage["calls"] += 1
+        """Logs the tokens of one call and adds them to the run's totals (and to its phase's)."""
         who = _CALLER.get()
+        ph = self.usage["by_phase"].setdefault(phase_of(who), {k: 0 for k in COUNTERS})
+        tin, tout = (u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0) if u else (0, 0)
+        reasoning = ((u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0) if u else 0
+        # input tokens the server took from its prefix cache (OpenAI/vLLM field; some gateways use the other)
+        cached = ((u.get("prompt_tokens_details") or {}).get("cached_tokens") or u.get("cache_read_input_tokens")
+                  or 0) if u else 0
+        for tot in (self.usage, ph):
+            tot["calls"] += 1
+            tot["seconds"] = round(tot["seconds"] + seconds, 1)
+            tot["prompt_tokens"] += tin
+            tot["completion_tokens"] += tout
+            tot["reasoning_tokens"] += reasoning
+            tot["cached_tokens"] += cached
+            tot["calls_without_usage"] += 0 if u else 1
+        self._save_usage()
         if not u:
             log.info("  [%s] LLM call %d: token usage not returned by the server (%.1fs)",
                      who, self.usage["calls"], seconds)
             return
-        tin, tout = u.get("prompt_tokens", 0) or 0, u.get("completion_tokens", 0) or 0
-        self.usage["prompt_tokens"] += tin
-        self.usage["completion_tokens"] += tout
-        reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0
-        log.info("  [%s] LLM call %d: %d in + %d out tokens%s (%.1fs) | total %d in + %d out",
-                 who, self.usage["calls"], tin, tout, f" ({reasoning} reasoning)" if reasoning else "",
+        log.info("  [%s] LLM call %d: %d in%s + %d out tokens%s (%.1fs) | total %d in + %d out",
+                 who, self.usage["calls"], tin, f" ({cached} cached)" if cached else "", tout,
+                 f" ({reasoning} reasoning)" if reasoning else "",
                  seconds, self.usage["prompt_tokens"], self.usage["completion_tokens"])
 
     def ask_json(self, system: str, user: str, retries: int = 2):
