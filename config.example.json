@@ -28,6 +28,12 @@
     "make_jobs": 0,
     "verify_dockerfile": false
   },
+  "execution": {
+    "backend": "docker",
+    "shell": "cmd",
+    "vcvars": "auto",
+    "python": ""
+  },
   "web_search": {
     "backend": "duckduckgo",
     "searxng_url": "",

@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -45,20 +46,24 @@ class ExecResult:
         return self.rc == 0 and not self.timed_out
 
 
-def _run(args: list[str], timeout: float | None = None, log_path: str | Path | None = None,
-         on_line=None, keep_lines: int = 4000, stdin_text: str | None = None) -> ExecResult:
+def _run(args: list[str] | str, timeout: float | None = None, log_path: str | Path | None = None,
+         on_line=None, keep_lines: int = 4000, stdin_text: str | None = None, env: dict | None = None) -> ExecResult:
     """Runs a host command, merging stderr into stdout, teeing to log_path,
     keeping the last keep_lines lines in memory. sat rewrites progress lines
-    with '\\r', so both '\\r' and '\\n' end a line for on_line."""
+    with '\\r', so both '\\r' and '\\n' end a line for on_line. A str is an exact
+    Windows command line (local backend: cmd.exe /s /c "...")."""
     tail: collections.deque[str] = collections.deque(maxlen=keep_lines)
     fh = open(log_path, "a", encoding="utf-8", errors="replace") if log_path else None
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL)
     timed_out = False
 
     def killer():
         nonlocal timed_out
         timed_out = True
+        if os.name == "nt":
+            # cmd.exe /c: kill the whole tree (sat, msbuild, cl...), not only cmd.exe
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
         proc.kill()
 
     timer = threading.Timer(timeout, killer) if timeout else None
@@ -96,7 +101,7 @@ def _run(args: list[str], timeout: float | None = None, log_path: str | Path | N
 
 def _label(inspect_cmd: list[str], ref: str) -> str:
     r = subprocess.run([*inspect_cmd, "-f", '{{index .Config.Labels "%s"}}' % DockerEnv.LABEL, ref],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
@@ -229,6 +234,12 @@ def parse_dockerfile_packages(text: str) -> list[str]:
 class DockerEnv:
     """One long-lived container per port, all work through `docker exec`."""
 
+    kind = "docker"
+    system = "Linux"
+    windows = False
+    python = "python3"
+    quote = staticmethod(shlex.quote)
+
     def __init__(self, name: str, image: str, mounts: list[str], workdir: str, home: str,
                  run_as_host_user: bool = True, extra_run_args: list[str] | None = None):
         self.name = name
@@ -239,7 +250,8 @@ class DockerEnv:
             for m in mounts))
         self.workdir = workdir
         self.home = home
-        self.user = f"{os.getuid()}:{os.getgid()}" if run_as_host_user else None
+        # no uid on Windows hosts (os.getuid does not exist there): run as the image's user
+        self.user = f"{os.getuid()}:{os.getgid()}" if run_as_host_user and hasattr(os, "getuid") else None
         self.extra_run_args = extra_run_args or []
         self.lock = threading.Lock()
 
@@ -265,7 +277,7 @@ class DockerEnv:
     # -- container lifecycle
     def _inspect_state(self) -> str | None:
         r = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}}", self.name],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
         return r.stdout.strip() if r.returncode == 0 else None
 
     def wanted_mounts(self) -> dict[str, bool]:
@@ -273,7 +285,7 @@ class DockerEnv:
         return {(m[:-3] if m.endswith(":ro") else m): m.endswith(":ro") for m in self.mounts}
 
     def _current_mounts(self) -> dict[str, bool]:
-        r = subprocess.run(["docker", "inspect", "-f", "{{json .Mounts}}", self.name], capture_output=True, text=True)
+        r = subprocess.run(["docker", "inspect", "-f", "{{json .Mounts}}", self.name], capture_output=True, text=True, encoding="utf-8", errors="replace")
         try:
             return {m["Destination"]: not m.get("RW", True) for m in json.loads(r.stdout or "[]")
                     if m.get("Type") == "bind"}
@@ -302,7 +314,7 @@ class DockerEnv:
             path, ro = (m[:-3], ":ro") if m.endswith(":ro") else (m, "")
             args += ["-v", f"{path}:{path}{ro}"]
         args += ["-w", self.workdir, *self.extra_run_args, self.image, "sleep", "infinity"]
-        r = subprocess.run(args, capture_output=True, text=True)
+        r = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             raise DockerError(f"docker run failed: {r.stderr.strip()}")
         log.info("container %s started from %s", self.name, self.image)
@@ -314,7 +326,8 @@ class DockerEnv:
     # -- execution
     def exec(self, cmd: str, root: bool = False, timeout: float | None = 3600,
              log_path: str | Path | None = None, on_line=None, env: dict | None = None,
-             cwd: str | None = None, keep_lines: int = 4000) -> ExecResult:
+             cwd: str | None = None, keep_lines: int = 4000, shell: str | None = None) -> ExecResult:
+        """`shell`: the local backend's choice of interpreter; in a container commands are bash."""
         args = ["docker", "exec", "-i", "-w", cwd or self.workdir]
         if not root and self.user:
             args += ["-u", self.user]

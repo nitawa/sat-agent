@@ -22,15 +22,38 @@ def ctest_dirs(ctx) -> list[str]:
     return sorted(str(f.parent) for f in (ctx.app_workdir / "INSTALL").glob("*/bin/salome/test/CTestTestfile.cmake"))
 
 
+def _windows(ctx) -> bool:
+    return bool(getattr(ctx.env, "windows", False))
+
+
+def launcher_file(ctx):
+    """The application launcher `sat launcher` writes: salome (bash) or salome.bat (Windows)."""
+    return ctx.app_workdir / ("salome.bat" if _windows(ctx) else "salome")
+
+
+def env_file(ctx):
+    """The environment `sat environ` writes: env_launch.sh, or env_launch.bat on Windows."""
+    return ctx.app_workdir / ("env_launch.bat" if _windows(ctx) else "env_launch.sh")
+
+
 def test_cmd(ctx, extra_args: list[str], include: str = "", exclude: str = "",
              test_dirs: list[str] | None = None) -> str:
-    """`salome test ...`, or, with `test_dirs`, ctest in each of them after sourcing env_launch.sh."""
+    """`salome test ...`, or, with `test_dirs`, ctest in each of them after sourcing env_launch.sh
+    (Windows: cmd.exe commands, env_launch.bat, no Xvfb)."""
     tcfg = ctx.cfg["tests"]
     args = list(tcfg.get("ctest_args") or []) + extra_args
     if include:
         args += ["-R", include]
     if exclude:
         args += ["-E", exclude]
+    if _windows(ctx):
+        q = ctx.env.quote
+        qargs = " ".join(q(a) for a in args)
+        if test_dirs is None:
+            return f"call {q(str(launcher_file(ctx)))} test {qargs}"
+        # the results are read from ctest's output (parse_ctest), not from the exit code
+        runs = " & ".join(f"pushd {q(d)} && ctest {qargs} & popd" for d in test_dirs)
+        return f"call {q(str(env_file(ctx)))} && {runs}"
     qargs = " ".join(shlex.quote(a) for a in args)
     xvfb = "xvfb-run -a -s '-screen 0 1600x1200x24' " if tcfg.get("use_xvfb", True) else ""
     workdir = shlex.quote(str(ctx.app_workdir))

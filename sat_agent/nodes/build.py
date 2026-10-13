@@ -10,6 +10,7 @@
                                          └─────────── failure_gate: retry with hint | skip | abort
 """
 
+import re
 from pathlib import Path
 
 from langgraph.graph import END
@@ -24,9 +25,9 @@ from sat_agent.diagnose import pre_analysis
 from sat_agent.logs import log
 from sat_agent.parsers import first_errors, parse_check_system, parse_compile, parse_prepare, strip_ansi
 from sat_agent.platform import choose_reference_platform
-from sat_agent.sysdeps import (SysdepsReport, apply_replacement, declare_translated, resolve_missing,
+from sat_agent.sysdeps import (SysdepsReport, apply_replacement, declare_translated, embed_version, resolve_missing,
                                seed_from_reference_dockerfile, translate_declarations, translate_names)
-from sat_agent.tools.build_tools import FixSession
+from sat_agent.tools.build_tools import FixSession, declared_packages
 from sat_agent.tools.common import make_common_tools
 
 
@@ -75,18 +76,30 @@ def setup_platform(state, config):
     # FD42's choices, not from an FD44 the application knows nothing about
     app_known = list(dict.fromkeys(platforms + [d for b in pe.app_overwrite_blocks(app_text) for d in b.dists]))
     known = app_known or list(dict.fromkeys(pe.system_info_dists(sys_text)))
+    if not ctx.family.system_packages:
+        # Windows: only the application's other Windows versions can be a reference
+        known = [d for d in app_known if d.startswith("W")]
     ref = state.get("ref_dist") or choose_reference_platform(ctx.dist, [p for p in known if p != ctx.dist],
                                                             ctx.family)
     if state.get("done", {}).get("setup"):
         return Command(update={"ref_dist": ref, "platforms": platforms}, goto="native_choices")
     log.info("registering %s in %s (reference platform: %s)", ctx.dist, app_file.name, ref or "none")
 
-    app_text = pe.app_add_platform(app_text, ctx.dist)
+    if platforms or ctx.family.system_packages:
+        # (a *-windows application has no `platform` list: creating one would make sat warn every
+        # other Windows version that the application is not supported there)
+        app_text = pe.app_add_platform(app_text, ctx.dist)
     if ref:
         app_text = pe.app_inherit_overwrites(app_text, ref, ctx.dist)
     else:
         app_text = pe.app_ensure_dedicated_block(app_text, ctx.dist)
     app_file.write_text(app_text, encoding="utf-8")
+
+    if not ctx.family.system_packages:
+        # Windows: no system package to declare, translate or install, no Dockerfile
+        _commit(ctx, f"Register platform {ctx.dist} ({ctx.osr.pretty_name}), inherited from {ref or 'nothing'}")
+        done = dict(state.get("done") or {}, setup=True)
+        return Command(update={"ref_dist": ref, "platforms": platforms, "done": done}, goto="native_choices")
 
     if ref:
         for f in sorted((ctx.sat_salome_dir / "products").glob("*.pyconf")):
@@ -104,7 +117,10 @@ def setup_platform(state, config):
     if ref:
         cands = sorted((ctx.sat_salome_dir / "dockers").glob(f"SALOMEPlatform.Dockerfile.{ref.lower()}-*"))
         ref_df = next((c for c in cands if c.name.endswith(ctx.arch)), cands[0] if cands else None)
-    seed_from_reference_dockerfile(ctx, ref_df, report)
+    if not getattr(ctx, "local", False):
+        # (local mode: nothing is installed on the machine beyond what sat reports missing, and only
+        # once the maintainer agrees: see system_deps)
+        seed_from_reference_dockerfile(ctx, ref_df, report)
     _commit(ctx, f"Register platform {ctx.dist} ({ctx.osr.pretty_name}), inherited from {ref or 'nothing'}")
     done = dict(state.get("done") or {}, setup=True)
     return Command(update={"ref_dist": ref, "platforms": platforms, "done": done,
@@ -127,6 +143,8 @@ def native_choices(state, config):
     if not pending:
         return Command(goto="apply_guidance")
     item = pending[0]
+    if item.get("kind") == "missing_on_host":
+        return _missing_on_host(state, ctx, item, pending)
     product, embed = item["product"], item.get("embed") or {}
     if state.get("batch"):
         decision = {"action": _policy(ctx).get("unmapped_native", "embed")}
@@ -140,10 +158,7 @@ def native_choices(state, config):
     fixes, skipped = list(state.get("fixes") or []), list(state.get("skipped") or [])
     app = ctx.app_file()
     if act == "embed":
-        app.write_text(pe.app_overwrite_set(app.read_text(encoding="utf-8"), ctx.dist,
-                                            f"APPLICATION.products.{product}",
-                                            pe.product_spec_text(embed["tag"], embed.get("section"))),
-                       encoding="utf-8")
+        _embed(ctx, product, embed)
         summary = (f"{product} is built from sources on {ctx.dist} (version {embed['tag']}: {embed.get('why')}): "
                    f"no {ctx.family.name} package for {', '.join(item['packages'])}.")
     elif act == "package":
@@ -177,6 +192,159 @@ def native_choices(state, config):
     _commit(ctx, summary)
     return Command(update={"native_choices": pending[1:], "fixes": fixes, "skipped": skipped},
                    goto="native_choices")
+
+
+def _embed(ctx, product: str, embed: dict) -> None:
+    """Builds `product` from sources on this platform only (version embed["tag"])."""
+    app = ctx.app_file()
+    app.write_text(pe.app_overwrite_set(app.read_text(encoding="utf-8"), ctx.dist, f"APPLICATION.products.{product}",
+                                        pe.product_spec_text(embed["tag"], embed.get("section"))), encoding="utf-8")
+
+
+HOST_ACTIONS = ("install", "source", "skip")
+
+
+def host_choices(ctx, missing: list[str]) -> list[dict]:
+    """Local mode: packages missing on this machine (but installable), grouped by the native
+    product declaring them; packages of no product (salome_system...) cannot be built from sources."""
+    owners: dict[str, list[str]] = {}
+    products = set(ctx.sat.app_products() or [])
+    for f in sorted((ctx.sat_salome_dir / "products").glob("*.pyconf")):
+        if f.stem not in products or f.stem == "salome_system":
+            continue
+        declared = set(declared_packages(f.read_text(encoding="utf-8", errors="replace"), ctx.family.sat_keys,
+                                         ctx.dist))
+        for pkg in missing:
+            if pkg in declared and not any(pkg in v for v in owners.values()):
+                owners.setdefault(f.stem, []).append(pkg)
+    rest = [p for p in missing if not any(p in v for v in owners.values())]
+    if rest:
+        owners["salome_system"] = rest
+    return [{"kind": "missing_on_host", "product": prod, "packages": pkgs, "family": ctx.family.name,
+             "embed": embed_version(ctx, prod) if prod != "salome_system" else {},
+             "pretty": ctx.osr.pretty_name, "dist": ctx.dist} for prod, pkgs in owners.items()]
+
+
+def _missing_on_host(state, ctx, item: dict, pending: list[dict]):
+    """The maintainer's answer for a native product missing on this machine: install its packages
+    with the package manager, build it from sources on this platform (macOS: with the Homebrew
+    formula's patches, registered in sat_salome), or leave it missing."""
+    product, pkgs = item["product"], item["packages"]
+    buildable = product != "salome_system" and bool((item.get("embed") or {}).get("tag"))
+    if state.get("batch"):
+        pol = _policy(ctx)
+        act = pol.get("missing_on_host", "source")
+        if act == "source" and not buildable:
+            act = "install" if pol.get("local_install") == "yes" else "skip"
+        decision = {"action": act}
+    else:
+        decision = interrupt({**item, "buildable": buildable})
+    act = decision.get("action")
+    if act not in HOST_ACTIONS or (act == "source" and not buildable):
+        item = dict(item, last_error=f"unknown or impossible decision {decision!r}")
+        return Command(update={"native_choices": [item] + pending[1:]}, goto="native_choices")
+    decided = dict(state.get("local_installs") or {})
+    decided.update({p: act for p in pkgs})
+    fixes = list(state.get("fixes") or [])
+    actions: list[str] = []
+    if act == "install":
+        ctx.host_approved.update(pkgs)
+        installed, failed = ctx.install_packages(pkgs, f"{product}, maintainer's choice")
+        summary = (f"{product}: {' '.join(installed) or 'nothing'} installed on this machine with {ctx.family.name}"
+                   + (f"; failed: {' '.join(failed)}" if failed else "") + ".")
+    elif act == "source":
+        embed = dict(item["embed"])
+        if ctx.family.name == "brew":
+            embed, actions = _brew_sources(ctx, state.get("ref_dist"), product, pkgs, embed)
+        else:
+            _embed(ctx, product, embed)
+        summary = (f"{product} is built from sources on {ctx.dist} (version {embed['tag']}: {embed.get('why')}) "
+                   f"instead of installing {' '.join(pkgs)} on this machine (maintainer's choice).")
+    else:
+        summary = f"{product}: {' '.join(pkgs)} left missing on this machine (maintainer's choice)."
+    log.info("%s", summary)
+    for a in actions:
+        log.info("  %s", a)
+    fixes.append({"phase": "native", "product": product, "summary": summary, "actions": actions})
+    _commit(ctx, summary)
+    return Command(update={"native_choices": pending[1:], "fixes": fixes, "local_installs": decided},
+                   goto="native_choices")
+
+
+def _norm_version(v: str) -> str:
+    return re.sub(r"^[vV]", "", (v or "").strip()).replace("_", ".").replace("-", ".")
+
+
+def _brew_sources(ctx, ref, product: str, formulae: list[str], embed: dict) -> tuple[dict, list[str]]:
+    """Embeds `product` and takes over what Homebrew does to build it on macOS: the patches of its
+    formulae (downloaded, sha256-checked, made -p1) are registered in its platform section of
+    sat_salome; build arguments and inreplace edits are kept as evidence for the build agent
+    (ports/<DIST>/brew/<product>.json). Patches are registered only if the version built here is
+    the formula's: a patch for another version is kept aside, with a note."""
+    import json
+
+    from sat_agent import brew
+
+    out = ctx.port_dir / "brew"
+    out.mkdir(parents=True, exist_ok=True)
+    actions, parsed = [], []
+    for name in formulae:
+        try:
+            text = brew.fetch_formula(name, run_brew=lambda c: ctx.env.exec(c, timeout=300))
+        except Exception as e:  # noqa: BLE001
+            actions.append(f"Homebrew formula {name}: not found ({e})")
+            continue
+        (out / f"{name}.rb").write_text(text, encoding="utf-8")
+        parsed.append(brew.parse_formula(name, text))
+    # build the formula's version when the product knows it (its patches then apply as they are)
+    sections = pe.product_sections(ctx.product_file(product).read_text(encoding="utf-8")) \
+        if ctx.product_file(product).exists() else []
+    for f in parsed:
+        sec = "version_" + re.sub(r"[.\-]", "_", f.version)
+        if f.version and f.patches and sec in sections and _norm_version(embed.get("tag")) != _norm_version(f.version):
+            embed = {"tag": f.version, "section": None, "why": f"version of the Homebrew formula {f.name}"}
+    _embed(ctx, product, embed)
+    files: list[tuple[str, str]] = []
+    record = {"product": product, "tag": embed["tag"], "formulae": []}
+    for f in parsed:
+        rec = {"name": f.name, "version": f.version, "build_args": f.build_args, "inreplace": f.inreplace,
+               "skipped": f.skipped, "registered": [], "kept_aside": [], "errors": []}
+        same = not f.version or _norm_version(f.version) == _norm_version(embed["tag"])
+        for i, p in enumerate(f.patches, 1):
+            name = f"{product}-brew-{f.name}-{i}-{ctx.dist}.patch"
+            try:
+                text = brew.fetch_patch(p)
+            except Exception as e:  # noqa: BLE001
+                rec["errors"].append(f"{p.url or ':DATA'}: {e}")
+                continue
+            if same:
+                files.append((name, text))
+                rec["registered"].append(name)
+            else:
+                (out / name).write_text(text, encoding="utf-8")
+                rec["kept_aside"].append(name)
+        record["formulae"].append(rec)
+        actions.append(f"Homebrew formula {f.name} {f.version or '?'}: {len(rec['registered'])} patch(es) registered"
+                       + (f", {len(rec['kept_aside'])} kept in ports/{ctx.dist}/brew/ (written for {f.version}, "
+                          f"{product} is built at {embed['tag']})" if rec["kept_aside"] else "")
+                       + (f", errors: {'; '.join(rec['errors'])}" if rec["errors"] else "")
+                       + (f"; Homebrew builds it with {' '.join(f.build_args)}" if f.build_args else "")
+                       + (f"; {f.inreplace} inreplace edit(s) in the formula" if f.inreplace else ""))
+    if files:
+        session = FixSession(ctx, ref)
+        info = ctx.sat.product_info(product)
+        current = [Path(x).name for x in info.get("patches") or []]
+        section = session.platform_section(product)
+        patches_dir = ctx.sat_salome_dir / "products" / "patches"
+        patches_dir.mkdir(parents=True, exist_ok=True)
+        for name, text in files:
+            (patches_dir / name).write_text(text, encoding="utf-8")
+        pfile = ctx.product_file(product)
+        pfile.write_text(pe.set_section_list(pfile.read_text(encoding="utf-8"), section, "patches",
+                                             current + [n for n, _ in files if n not in current]), encoding="utf-8")
+        actions += session.actions + [f"{product}: patch `{n}` registered in section `{section}`" for n, _ in files]
+    (out / f"{product}.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+    return embed, actions
 
 
 def _save_mapping(ctx, src: str, entries: dict) -> None:
@@ -249,9 +417,26 @@ def _merge_report(old: dict | None, rep: SysdepsReport) -> dict:
 def system_deps(state, config):
     """`sat config <APP> --check_system` until nothing is missing."""
     ctx = _ctx(config)
+    if not ctx.family.system_packages:
+        log.info("%s: no system prerequisites (every product is built by sat)", ctx.dist)
+        update = {"done": dict(state.get("done") or {}, sysdeps=True)}
+        if state.get("stop_after") == "sysdeps":
+            return Command(update={**update, "build_status": "stopped"}, goto=END)
+        return Command(update=update, goto="prepare")
     report = SysdepsReport()
     unresolved: list[str] = []
     previous = None
+    if getattr(ctx, "local", False):
+        # this machine: what is missing but installable is the maintainer's decision, per product
+        decided = dict(state.get("local_installs") or {})
+        ctx.host_approved.update(p for p, d in decided.items() if d == "install")
+        cs = parse_check_system(ctx.sat.check_system().output)
+        status = ctx.installable(cs.missing) if cs.missing else {}
+        ask = [p for p in cs.missing if status.get(p) and p not in decided]
+        if ask:
+            log.info("%d native package(s) missing on this machine: %s", len(ask), " ".join(ask))
+            return Command(update={"native_choices": host_choices(ctx, ask) + list(state.get("native_choices") or [])},
+                           goto="native_choices")
     for i in range(_policy(ctx)["sysdeps_passes"]):
         r = ctx.sat.check_system()
         cs = parse_check_system(r.output)
@@ -265,6 +450,11 @@ def system_deps(state, config):
             break
         previous = cs.missing
         unresolved = resolve_missing(ctx, cs.missing, report)
+    skipped_here = [p for p in unresolved if (state.get("local_installs") or {}).get(p) == "skip"]
+    if skipped_here:
+        # left missing by the maintainer: not a failure to fix (sat prepare/compile will tell)
+        ctx.notes.append(f"left missing on this machine (maintainer's choice): {' '.join(skipped_here)}")
+        unresolved = [p for p in unresolved if p not in skipped_here]
     report.unresolved = unresolved
     _commit(ctx, "System prerequisites (check_system)")
     update = {"sysdeps": _merge_report(state.get("sysdeps"), report)}
@@ -409,6 +599,17 @@ def _task(ctx, state, failure: dict) -> str:
                   f"tests: {', '.join(fb.get('tests') or [])}", f"category: {fb.get('category')}",
                   f"product: {fb.get('product')}", f"diagnosis: {fb.get('diagnosis')}",
                   f"suggested fix: {fb.get('fix')}", "", failure.get("message", "")]
+    brew_rec = ctx.port_dir / "brew" / f"{product}.json" if product else None
+    if brew_rec is not None and brew_rec.exists():
+        import json
+        rec = json.loads(brew_rec.read_text(encoding="utf-8"))
+        lines += ["", f"{product} is built from sources here instead of its Homebrew formula; what Homebrew does "
+                      f"to build it on macOS (formula copies in {ctx.port_dir / 'brew'}):"]
+        for f in rec.get("formulae") or []:
+            lines.append(f"- {f['name']} {f.get('version') or ''}: patches registered {f.get('registered') or 'none'}"
+                         + (f", patches for {f.get('version')} kept aside {f['kept_aside']}" if f.get("kept_aside") else "")
+                         + (f", build arguments {' '.join(f['build_args'])}" if f.get("build_args") else "")
+                         + (f", {f['inreplace']} inreplace edit(s)" if f.get("inreplace") else ""))
     key = f"{phase}:{product}"
     previous = [f for f in (state.get("fixes") or []) + (state.get("gave_up") or []) if f.get("key") == key]
     if previous:

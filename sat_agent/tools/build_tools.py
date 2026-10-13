@@ -46,19 +46,24 @@ def host_paths(ctx) -> list[str]:
 
 def refuse_host_path(ctx, text: str) -> str | None:
     for r in host_paths(ctx):
-        if r in (text or ""):
+        # Windows paths are also written with "/" (C:/Users/...), and case does not matter there
+        if any(v in (text or "") for v in {r, r.replace("\\", "/")}) or \
+                ("\\" in r and r.replace("\\", "/").lower() in (text or "").replace("\\", "/").lower()):
             return (f"refused: the value contains the local path {r}; sat_salome must stay portable. Use "
                     "sat variables ($APPLICATION.workdir, $SOURCE_DIR, $PRODUCT_INSTALL...) or, for a build "
                     "script, add_compil_script (scripts are found by name in products/compil_scripts).")
     return None
 
 
-def declared_packages(text: str, keys: tuple[str, ...]) -> list[str]:
-    """Every system package a product pyconf declares for a package family (all sections)."""
+def declared_packages(text: str, keys: tuple[str, ...], dist: str | None = None) -> list[str]:
+    """Every system package a product pyconf declares for a package family (all sections), and,
+    with `dist`, in its platform blocks too (system_info."MA15".brew_dev)."""
     found = []
     for sec in pe.product_sections(text):
         for k in keys:
             found += pe.get_str_list(text, [sec, "system_info"], k) or []
+            if dist:
+                found += pe.get_str_list(text, [sec, "system_info", dist], k) or []
     return found
 
 
@@ -78,13 +83,13 @@ class FixSession:
         """Source directory of a product of the application, inside its SOURCES (never sat,
         sat_salome or another directory reached with `..`: their changes are not patches)."""
         sources = (self.ctx.app_workdir / "SOURCES").resolve()
-        if not product or "/" in product or product in (".", ".."):
+        if not product or "/" in product or "\\" in product or product in (".", ".."):
             raise ValueError(f"{product!r} is not a product name")
         info = self.ctx.sat.product_info(product)
         if not info["exists"]:
             raise ValueError(f"{product} is not a product of {self.ctx.app}")
         root = Path(info.get("source_dir") or sources / product).resolve()
-        if root != sources / product and not str(root).startswith(str(sources) + "/"):
+        if root != sources / product and sources not in root.parents:
             raise ValueError(f"the sources of {product} ({root}) are not under {sources}")
         return root
 
@@ -167,6 +172,7 @@ class FixSession:
         """upfront: applying the maintainer's instructions before the first build
         (other terminal statuses, see prompts.GUIDANCE_TASK)."""
         ctx = self.ctx
+        windows = bool(getattr(ctx.env, "windows", False))
         statuses = ["applied", "nothing_to_apply"] if upfront else ["fixed", "give_up"]
 
         def edit_source(product: str, path: str, old_text: str, new_text: str) -> str:
@@ -177,7 +183,7 @@ class FixSession:
                         "sat and sat_salome are changed through the other action tools")
             p = Path(path)
             p = (p if p.is_absolute() else root / p).resolve()
-            if not str(p).startswith(str(root) + "/"):
+            if root not in p.parents:
                 return f"refused: {p} is not under the sources of {product} ({root})"
             if not p.is_file():
                 return f"{p} does not exist"
@@ -188,7 +194,7 @@ class FixSession:
             n = text.count(old_text)
             if n != 1:
                 return f"old_text found {n} times in {p.name}; give a unique, exact excerpt (with indentation)"
-            rel = str(p.relative_to(root))
+            rel = p.relative_to(root).as_posix()      # patch paths use "/" (Windows too)
             self.originals.setdefault((product, rel), text)
             p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
             self.rebuild.add(product)
@@ -251,7 +257,7 @@ class FixSession:
         def set_product_version(product: str, version: str, section: str = "") -> str:
             if version == "native":
                 f = ctx.product_file(product)
-                pkgs = declared_packages(f.read_text(encoding="utf-8"), ctx.family.sat_keys) if f.exists() else []
+                pkgs = declared_packages(f.read_text(encoding="utf-8"), ctx.family.sat_keys, ctx.dist) if f.exists() else []
                 if not pkgs:
                     return (f"refused: {product} declares no distribution package (system_info."
                             f"{'/'.join(ctx.family.sat_keys)}): 'native' would not install it, sat would just "
@@ -274,23 +280,29 @@ class FixSession:
             bad = refuse_host_path(ctx, content)
             if bad:
                 return bad
-            if not content.lstrip().startswith("#!"):
+            # sat picks <name>$VARS.scriptExtension: .bat on Windows (cmd), .sh elsewhere (bash)
+            ext = ".bat" if windows else ".sh"
+            if windows and content.lstrip().startswith("#!"):
+                return ("refused: on Windows a build script is a batch file run by cmd.exe (like "
+                        "compil_scripts/boost_V1.79.0.bat: @echo off, %SOURCE_DIR%, %PRODUCT_INSTALL%), not bash")
+            if not windows and not content.lstrip().startswith("#!"):
                 return "the script must start with a shebang line (#!/bin/bash), like the existing ones"
             scripts = ctx.sat_salome_dir / "products" / "compil_scripts"
             name = f"{product}_{ctx.suffix}"
-            path = scripts / f"{name}.sh"
+            path = scripts / f"{name}{ext}"
             scripts.mkdir(parents=True, exist_ok=True)
             path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
-            path.chmod(0o755)
+            if not windows:
+                path.chmod(0o755)
             section = self.platform_section(product)
             pfile = ctx.product_file(product)
             text = pe.set_key(pfile.read_text(encoding="utf-8"), [section], "compil_script",
                               f"'{name}' + $VARS.scriptExtension")
             pe.PyconfText(text)
             pfile.write_text(text, encoding="utf-8")
-            self.actions.append(f"{product}: build script compil_scripts/{name}.sh (section `{section}`)")
+            self.actions.append(f"{product}: build script compil_scripts/{name}{ext} (section `{section}`)")
             self.rebuild.add(product)
-            return (f"wrote compil_scripts/{name}.sh; section {section} of {pfile.name} now uses it "
+            return (f"wrote compil_scripts/{name}{ext}; section {section} of {pfile.name} now uses it "
                     f"(only {ctx.dist} selects this section)")
 
         def exclude_product(product: str, reason: str) -> str:
@@ -302,7 +314,19 @@ class FixSession:
         def finish(status: str, summary: str, rebuild: list[str] | None = None, patch_title: str = "") -> dict:
             return {"status": status, "summary": summary, "rebuild": rebuild or [], "patch_title": patch_title}
 
-        return [
+        script_doc = (
+            "Give a product its own build script on this Windows platform: full content of "
+            "products/compil_scripts/<product>_<DIST>.bat, a batch file run by cmd.exe, usually the current "
+            "script (read_file sat_salome/products/compil_scripts/<script>.bat) with a change. Use sat's "
+            "variables (%SOURCE_DIR%, %BUILD_DIR%, %PRODUCT_INSTALL%, %CMAKE_GENERATOR%), never local paths."
+            if windows else
+            "Give a product built with a script (build_source 'script') its own "
+            "build script on this platform: full content of products/compil_scripts/<product>_<DIST>.sh, "
+            "usually the current script (read_file sat_salome/products/compil_scripts/<script>) with a "
+            "change such as an extra configure/bootstrap option. Use sat's variables ($SOURCE_DIR, "
+            "$PRODUCT_INSTALL, $MAKE_OPTIONS), never local paths.")
+        package_tools = {"install_system_packages", "replace_system_package"}
+        tools = [
             Tool("edit_source", "Replace one exact excerpt of a source file of a product (path relative to its "
                  "SOURCES directory). The edit becomes a platform patch automatically; never edit files "
                  "any other way.", obj({"product": S, "path": S, "old_text": S, "new_text": S},
@@ -321,11 +345,7 @@ class FixSession:
                  "raw=true (then give pyconf syntax, e.g. a list or $expression).",
                  obj({"product": S, "key": S, "value": S, "raw": B}, ["product", "key", "value"]),
                  set_product_option),
-            Tool("add_compil_script", "Give a product built with a script (build_source 'script') its own "
-                 "build script on this platform: full content of products/compil_scripts/<product>_<DIST>.sh, "
-                 "usually the current script (read_file sat_salome/products/compil_scripts/<script>) with a "
-                 "change such as an extra configure/bootstrap option. Use sat's variables ($SOURCE_DIR, "
-                 "$PRODUCT_INSTALL, $MAKE_OPTIONS), never local paths.",
+            Tool("add_compil_script", script_doc,
                  obj({"product": S, "content": S}, ["product", "content"]), add_compil_script),
             Tool("set_product_version", "Use another version of a product on this platform: 'native' to take "
                  "the distribution package, or a tag/version known by its pyconf (see read_product_pyconf "
@@ -342,3 +362,5 @@ class FixSession:
                  obj({"status": {"type": "string", "enum": statuses}, "summary": S,
                       "rebuild": LS, "patch_title": S}, ["status", "summary"]), finish, terminal=True),
         ]
+        # Windows: sat builds every product, there is no system package to install or rename
+        return tools if ctx.family.system_packages else [t for t in tools if t.name not in package_tools]

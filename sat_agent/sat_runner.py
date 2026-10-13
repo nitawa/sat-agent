@@ -1,4 +1,4 @@
-"""sat commands, run inside the platform container.
+"""sat commands, run inside the platform container (or on this machine in local mode).
 
 Mirrors the documented workflow (SAT wiki, sat_salome/dockers/README.md):
 
@@ -29,9 +29,14 @@ class SatRunner:
         self.make_jobs = make_jobs
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
+    def q(self, s: str) -> str:
+        """Quoting of the shell the commands run in (bash in a container, cmd.exe on Windows)."""
+        return getattr(self.env, "quote", shlex.quote)(s)
+
     def cmd(self, args: str, app_command: bool = True) -> str:
-        opts = " ".join(f"-o {shlex.quote(o)}" for o in self.overrides) if app_command else ""
-        return f"python3 {shlex.quote(self.sat)} {opts} {args}".replace("  ", " ")
+        opts = " ".join(f"-o {self.q(o)}" for o in self.overrides) if app_command else ""
+        python = self.q(getattr(self.env, "python", "python3"))
+        return f"{python} {self.q(self.sat)} {opts} {args}".replace("  ", " ")
 
     def run(self, args: str, step: str, timeout: float = 3600, app_command: bool = True,
             on_line=None, keep_lines: int = 4000) -> ExecResult:
@@ -44,16 +49,24 @@ class SatRunner:
 
     # ------------------------------------------------------------------ setup
     def init(self, workdir: str, log_dir: str, project_pyconf: str) -> ExecResult:
-        r = self.run(f"init -w {shlex.quote(workdir)} -l {shlex.quote(log_dir)}", "init", app_command=False)
+        r = self.run(f"init -w {self.q(workdir)} -l {self.q(log_dir)}", "init", app_command=False)
         if not r.ok:
             return r
         self.run("init --reset_projects", "init", app_command=False)
-        return self.run(f"init --add_project {shlex.quote(project_pyconf)}", "init", app_command=False)
+        return self.run(f"init --add_project {self.q(project_pyconf)}", "init", app_command=False)
 
     def var(self, name: str) -> str | None:
         r = self.run(f"config -v VARS.{name}", "vars", app_command=False, timeout=300)
         m = re.search(rf"^\s*{re.escape(name)}\s*:\s*(\S+)", strip_ansi(r.output), re.MULTILINE)
         return m.group(1) if m else None
+
+    def app_var(self, key: str) -> str | None:
+        """A value of the application's config as sat resolves it (`sat config <APP> -v <key>`),
+        e.g. APPLICATION.workdir (the whole line: Windows paths may contain spaces)."""
+        r = self.run(f"config {self.app} -v {key}", "vars", timeout=300)
+        name = key.split(".")[-1]
+        m = re.search(rf"^\s*{re.escape(name)}\s*:\s*(.+?)\s*$", strip_ansi(r.output), re.MULTILINE)
+        return m.group(1).strip("'\"") if m else None
 
     # ------------------------------------------------------------------ steps
     def check_system(self) -> ExecResult:

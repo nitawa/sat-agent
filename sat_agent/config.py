@@ -38,6 +38,14 @@ DEFAULT_CONFIG: dict = {
         "make_jobs": 0,               # 0 = nproc inside the container
         "verify_dockerfile": False,   # rebuild the final Dockerfile from scratch at the end
     },
+    # Where sat runs: "docker" (a container of the target image) or "local" (this machine, without
+    # docker; Windows for now, see local_env.py). `port --local` selects "local".
+    "execution": {
+        "backend": "docker",
+        "shell": "cmd",              # local Windows: default interpreter of commands (cmd | powershell | python)
+        "vcvars": "auto",            # local Windows: vcvars64.bat to load ("auto" = vswhere, "" = none)
+        "python": "",                # local: python running sat (default: the one running sat-agent)
+    },
     "web_search": {
         "backend": "duckduckgo",     # duckduckgo | searxng | tavily | none
         "searxng_url": "",
@@ -74,6 +82,12 @@ DEFAULT_CONFIG: dict = {
         # batch mode, native product without a package on the new platform:
         # embed (build it from sources there) | none (native, no package) | remove (rm_products)
         "unmapped_native": "embed",
+        # local mode (`port --local`), batch: a native product whose package is not installed on this
+        # machine: "source" (build it from sources on this platform, with the Homebrew formula's
+        # patches on macOS) | "install" (install it with the package manager);
+        # local_install: other installs on this machine without asking ("no" | "yes")
+        "missing_on_host": "source",
+        "local_install": "no",
         "command_timeout_s": 3600,
         "compile_timeout_s": 12 * 3600,
     },

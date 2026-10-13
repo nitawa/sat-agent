@@ -9,12 +9,18 @@ open_port() is idempotent and runs at every start (fresh or --resume):
 4. create/reuse the git branches+worktrees `sat-agent/<DIST>` of sat and
    sat_salome, and the port directory work_root/ports/<DIST>/;
 5. start/reuse the long-lived container and `sat init` it.
+
+open_local_port() is the same without docker (`port --local`, Windows for now): the machine
+itself is the platform (local_env.py), its code is what sat computes there (W11), and there is
+no Dockerfile nor system package.
 """
 
 import hashlib
 import json
+import platform
 import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +31,8 @@ from sat_agent import sat_capabilities
 from sat_agent.docker_env import DockerEnv, DockerError, DockerfileSpec, _run, image_os_release
 from sat_agent.guard import check_sat_salome
 from sat_agent.logs import log
-from sat_agent.platform import SAT_DIST_CODES, OSRelease, PkgFamily, detect_family, family_for, section_suffix
+from sat_agent.platform import (NO_PACKAGES, SAT_DIST_CODES, OSRelease, PkgFamily, detect_family, family_for,
+                                section_suffix)
 from sat_agent.sat_runner import SatRunner
 
 _DETECT = r"""
@@ -58,15 +65,22 @@ class PortContext:
     sat_salome_dir: Path
     sat_base: str
     sat_salome_base: str
-    env: DockerEnv
+    env: DockerEnv               # or local_env.LocalEnv (same interface)
     sat: SatRunner
-    spec: DockerfileSpec
+    spec: DockerfileSpec | None  # None in local mode: no Dockerfile
     arch: str = "x86_64"
     llm: object = None
     web: object = None
     distro_name: str = ""
     notes: list = field(default_factory=list)
     request: object = None      # request.PortRequest: the maintainer's prompt (re-read at every start)
+    workdir: Path | None = None  # application directory as sat resolves it, when it is not <APP>-<DIST>
+    # local mode: installing on this machine is the maintainer's decision. ask_install(pkgs, reason)
+    # -> bool (cli.ask_install: a question, or policy.local_install in batch); approved packages
+    # come from the answers (state "local_installs") and from ask_install
+    ask_install: object = None
+    host_approved: set = field(default_factory=set)
+    host_refused: set = field(default_factory=set)
 
     # ------------------------------------------------------------- paths
     @property
@@ -87,7 +101,9 @@ class PortContext:
 
     @property
     def app_workdir(self) -> Path:
-        return self.build_root / f"{self.app}-{self.dist}"
+        # the Linux applications use $LOCAL.workdir/<APP>-<DIST>; the Windows ones
+        # $LOCAL.workdir/$APPLICATION.name: asked to sat in local mode (ctx.workdir)
+        return self.workdir or self.build_root / f"{self.app}-{self.dist}"
 
     @property
     def logs_dir(self) -> Path:
@@ -107,16 +123,29 @@ class PortContext:
     def product_file(self, product: str) -> Path:
         return self.sat_salome_dir / "products" / f"{product}.pyconf"
 
+    @property
+    def local(self) -> bool:
+        """Commands run on this machine, not in a container (no Dockerfile). Package queries then
+        run as the user; only installs need root (sudo on Linux)."""
+        return getattr(self.env, "kind", "docker") == "local"
+
+    @property
+    def windows(self) -> bool:
+        return bool(getattr(self.env, "windows", False))
+
     # ------------------------------------------------------------- actions
     def save_dockerfile(self) -> None:
-        self.spec.save(self.dockerfile_path)
+        if self.spec is not None:
+            self.spec.save(self.dockerfile_path)
 
     def installable(self, pkgs: list[str]) -> dict[str, bool]:
+        if not self.family.system_packages:
+            return {p: False for p in pkgs if p}
         res: dict[str, bool] = {}
         pkgs = [p for p in dict.fromkeys(pkgs) if p]
         for i in range(0, len(pkgs), 60):
             chunk = pkgs[i:i + 60]
-            out = self.env.exec(self.family.installable_cmd(chunk), root=True, timeout=1800)
+            out = self.env.exec(self.family.installable_cmd(chunk), root=not getattr(self, 'local', False), timeout=1800)
             for line in out.output.splitlines():
                 m = re.match(r"^(\S+) (OK|KO)$", line.strip())
                 if m:
@@ -129,22 +158,41 @@ class PortContext:
         """Installed packages that sat's check (exact name) will still report
         missing: they were installed through a virtual name / provides."""
         pkgs = [p for p in dict.fromkeys(pkgs) if p]
-        if not pkgs:
+        if not pkgs or not self.family.system_packages:
             return []
-        out = self.env.exec(self.family.installed_cmd(pkgs), root=True, timeout=600).output
+        out = self.env.exec(self.family.installed_cmd(pkgs), root=not getattr(self, 'local', False), timeout=600).output
         return [m.group(1) for m in re.finditer(r"^(\S+) KO$", out, re.M) if m.group(1) in pkgs]
 
     def providers(self, pkg: str) -> list[str]:
-        out = self.env.exec(self.family.provider_cmd(pkg), root=True, timeout=600).output
+        if not self.family.system_packages:
+            return []
+        out = self.env.exec(self.family.provider_cmd(pkg), root=not getattr(self, 'local', False), timeout=600).output
         return [n for n in self.family.parse_provides(out) if n != pkg]
 
     def install_packages(self, pkgs: list[str], reason: str = "") -> tuple[list[str], list[str]]:
-        """Installs live in the container and records them in the Dockerfile.
+        """Installs live in the container (local mode: on this machine, once approved) and records
+        them in the Dockerfile.
         Tries the whole set first, then one by one (one bad name must not
         block the others). Returns (installed, failed)."""
         pkgs = [p for p in dict.fromkeys(pkgs) if p]
         if not pkgs:
             return [], []
+        if not self.family.system_packages:
+            log.warning("%s has no system packages: not installing %s", self.dist, " ".join(pkgs))
+            return [], pkgs
+        if self.local:
+            ask = [p for p in pkgs if p not in self.host_approved]
+            if ask and self.ask_install is not None and self.ask_install(ask, reason):
+                self.host_approved.update(ask)
+            refused = [p for p in pkgs if p not in self.host_approved]
+            if refused:
+                self.host_refused.update(refused)
+                log.warning("not installing on this machine (not approved): %s", " ".join(refused))
+            pkgs = [p for p in pkgs if p in self.host_approved]
+            if not pkgs:
+                return [], refused
+        else:
+            refused = []
         log_path = self.logs_dir / "packages.log"
         r = self.env.exec(self.family.install_cmd(pkgs), root=True, timeout=3 * 3600, log_path=log_path)
         if r.ok:
@@ -154,9 +202,11 @@ class PortContext:
             for p in pkgs:
                 (installed if self.env.exec(self.family.install_cmd([p]), root=True, timeout=3600,
                                             log_path=log_path).ok else failed).append(p)
-        if installed:
+        failed += refused
+        if installed and self.spec is not None:
             self.spec.add_packages(installed)
             self.save_dockerfile()
+        if installed:
             log.info("installed %d package(s)%s: %s", len(installed), f" ({reason})" if reason else "",
                      " ".join(installed))
         if failed:
@@ -200,13 +250,17 @@ class GuardViolation(RuntimeError):
         self.violations = violations
 
 
-def detect_dist(image: str, sat_upstream: Path, osr: OSRelease, plan=None) -> tuple[str, str, bool]:
+def detect_dist(image: str, sat_upstream: Path, osr: OSRelease, plan=None, python: str = "") -> tuple[str, str, bool]:
     """(dist code, distribution name, known to sat). plan: distro_support.DistroPlan of a
-    distribution sat does not know (its code and version rule)."""
+    distribution sat does not know (its code and version rule). python: run sat's detection on
+    this machine with that interpreter (local mode) instead of in the image."""
     fallback = plan.code if plan is not None else \
         SAT_DIST_CODES.get(osr.id) or next((SAT_DIST_CODES[i] for i in osr.id_like if i in SAT_DIST_CODES), "")
-    args = ["docker", "run", "--rm", "-v", f"{sat_upstream}:/opt/sat-ro:ro", "--entrypoint", "python3", image,
-            "-B", "-c", _DETECT, "/opt/sat-ro"] + ([fallback] if fallback else [])
+    if python:
+        args = [python, "-B", "-c", _DETECT, str(sat_upstream)] + ([fallback] if fallback else [])
+    else:
+        args = ["docker", "run", "--rm", "-v", f"{sat_upstream}:/opt/sat-ro:ro", "--entrypoint", "python3", image,
+                "-B", "-c", _DETECT, "/opt/sat-ro"] + ([fallback] if fallback else [])
     r = _run(args, timeout=600)
     vals = dict(re.findall(r"^(NAME|DIST|FALLBACK|VERSION)=(.*)$", r.output, re.MULTILINE))
     if "DIST" in vals:
@@ -272,23 +326,8 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
     log.info("  sat platform code: %s%s", dist, "" if known else f" (distribution {distro_name!r} unknown to sat)")
 
     port_dir = work_root / "ports" / dist
-    port_dir.mkdir(parents=True, exist_ok=True)
-    branch = cfg["git"].get("branch_prefix", "sat-agent/") + dist
-    mode = cfg["git"].get("mode", "worktree")
-    existing = "continue"
-    if not (port_dir / "port.json").exists():
-        # a new port directory must not silently continue the commits of an earlier port
-        if mode == "worktree":
-            for repo in (sat_up, sal_up):
-                gw.git(repo, "worktree", "prune")
-        found = [gw.BranchInUse(repo, branch, gw.port_commits(repo, branch), gw.worktree_of(repo, branch))
-                 for repo in (sat_up, sal_up) if gw.branch_exists(repo, branch)]
-        if found:
-            existing = on_existing_branch(found) if on_existing_branch else "error"
-            if existing not in ("continue", "new"):
-                raise found[0]
-    sat_dir, sat_base = gw.prepare_checkout(sat_up, branch, mode, port_dir / "sat", existing=existing)
-    sal_dir, sal_base = gw.prepare_checkout(sal_up, branch, mode, port_dir / "sat_salome", existing=existing)
+    branch, mode, sat_dir, sat_base, sal_dir, sal_base = _port_branches(cfg, sat_up, sal_up, port_dir, dist,
+                                                                        on_existing_branch)
 
     # a distribution sat does not know: its support, on a dedicated branch merged into the port's
     if plan is not None:
@@ -350,17 +389,158 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
     else:
         env.exec(family.refresh_cmd(), root=True, timeout=1800)
 
+    _sat_init(ctx, branch)
+    return ctx
+
+
+def _port_branches(cfg: dict, sat_up: Path, sal_up: Path, port_dir: Path, dist: str, on_existing_branch):
+    """The port directory and its sat / sat_salome checkouts on branch sat-agent/<DIST>."""
+    port_dir.mkdir(parents=True, exist_ok=True)
+    branch = cfg["git"].get("branch_prefix", "sat-agent/") + dist
+    mode = cfg["git"].get("mode", "worktree")
+    existing = "continue"
+    if not (port_dir / "port.json").exists():
+        # a new port directory must not silently continue the commits of an earlier port
+        if mode == "worktree":
+            for repo in (sat_up, sal_up):
+                gw.git(repo, "worktree", "prune")
+        found = [gw.BranchInUse(repo, branch, gw.port_commits(repo, branch), gw.worktree_of(repo, branch))
+                 for repo in (sat_up, sal_up) if gw.branch_exists(repo, branch)]
+        if found:
+            existing = on_existing_branch(found) if on_existing_branch else "error"
+            if existing not in ("continue", "new"):
+                raise found[0]
+    sat_dir, sat_base = gw.prepare_checkout(sat_up, branch, mode, port_dir / "sat", existing=existing)
+    sal_dir, sal_base = gw.prepare_checkout(sal_up, branch, mode, port_dir / "sat_salome", existing=existing)
+    return branch, mode, sat_dir, sat_base, sal_dir, sal_base
+
+
+def _sat_init(ctx: PortContext, branch: str) -> None:
+    """`sat init` on the port's build tree and project, then checks the platform code sat sees."""
+    port_dir, sat = ctx.port_dir, ctx.sat
     # `sat init` rewrites the tracked data/local.pyconf with this machine's paths: never commit it
-    if gw.git(sat_dir, "ls-files", "data/local.pyconf", check=False):
-        gw.git(sat_dir, "update-index", "--skip-worktree", "data/local.pyconf")
-    r = sat.init(str(ctx.build_root), str(port_dir / "logs" / "sat"), str(sal_dir / "salome.pyconf"))
+    if gw.git(ctx.sat_dir, "ls-files", "data/local.pyconf", check=False):
+        gw.git(ctx.sat_dir, "update-index", "--skip-worktree", "data/local.pyconf")
+    r = sat.init(str(ctx.build_root), str(port_dir / "logs" / "sat"), str(ctx.sat_salome_dir / "salome.pyconf"))
     if not r.ok:
         raise RuntimeError(f"sat init failed:\n{r.output[-2000:]}")
     seen = sat.var("dist")
-    if seen and seen != dist:
-        raise RuntimeError(f"sat inside the container reports {seen}, expected {dist}")
+    if seen and seen != ctx.dist:
+        raise RuntimeError(f"sat {'on this machine' if ctx.local else 'inside the container'} reports {seen}, "
+                           f"expected {ctx.dist}")
     (port_dir / "port.json").write_text(json.dumps({
-        "image": image, "dist": dist, "family": family.name, "branch": branch, "sat": str(sat_dir),
-        "sat_salome": str(sal_dir), "sat_base": sat_base, "sat_salome_base": sal_base}, indent=1))
+        "image": ctx.image, "dist": ctx.dist, "family": ctx.family.name, "branch": branch, "sat": str(ctx.sat_dir),
+        "sat_salome": str(ctx.sat_salome_dir), "sat_base": ctx.sat_base, "sat_salome_base": ctx.sat_salome_base},
+        indent=1))
     log.info("port directory %s (branch %s)", port_dir, branch)
+
+
+def _machine_arch() -> str:
+    m = platform.machine().lower()
+    return {"amd64": "x86_64", "x64": "x86_64", "arm64": "aarch64"}.get(m, m or "x86_64")
+
+
+def _warn_crlf(repo: Path) -> str | None:
+    """git for Windows defaults to core.autocrlf=true: scripts and patches written there would be
+    committed with CRLF line ends, which breaks the Linux platforms' bash scripts and patches."""
+    val = gw.git(repo, "config", "--get", "core.autocrlf", check=False).strip().lower()
+    if val == "true":
+        msg = (f"{repo}: core.autocrlf=true. Files sat-agent writes are committed as written, but files git "
+               "checks out (patches, scripts) get CRLF on this machine; prefer `git config core.autocrlf "
+               "input` in sat and sat_salome")
+        log.warning(msg)
+        return msg
+    return None
+
+
+def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, system: str | None = None) -> PortContext:
+    """A port to this machine itself, without docker: sat runs here (local_env.LocalEnv). What
+    the machine is decides the rest:
+    * Windows: platform W<release> (sat knows it), no system package, cmd/PowerShell/Python;
+    * macOS: sat does not know it: a DistroPlan (name Darwin, new code, macOS major version,
+      Homebrew) is written on sat's branch sat-agent/distro-macos; native products are brew formulae;
+    * Linux: the distribution of /etc/os-release, as sat detects it; its package manager, with sudo.
+    Nothing is installed on the machine without the maintainer's approval (install_packages)."""
+    from sat_agent.local_env import (LocalEnv, detect_windows_dist, host_system, linux_os_release, macos_os_release,
+                                     macos_version, windows_os_release)
+
+    system = system or host_system()
+    if system not in ("Windows", "Darwin", "Linux"):
+        raise RuntimeError(f"--local: unsupported operating system {system!r}")
+    paths = cfg["paths"]
+    work_root = Path(paths["work_root"])
+    sat_up, sal_up = Path(paths["sat"]), Path(paths["sat_salome"])
+    for p in (sat_up / "sat", sal_up / "salome.pyconf"):
+        if not p.exists():
+            raise FileNotFoundError(f"{p} not found: check paths.sat / paths.sat_salome")
+    ex = cfg.get("execution") or {}
+    vcvars = ex.get("vcvars", "auto")
+    probe = LocalEnv(str(work_root), str(work_root / "home"), system=system, shell=ex.get("shell", "cmd"),
+                     vcvars=None if vcvars == "auto" else vcvars, python=ex.get("python") or "")
+    plan, known, distro_name = None, True, system
+    if system == "Windows":
+        osr, family = windows_os_release(), NO_PACKAGES
+        dist = detect_windows_dist(probe.python, sat_up)
+        if osr.pretty_name.startswith("Windows 11") and dist == "W10":
+            log.warning("Windows 11 seen by sat as W10: Python < 3.12 reports release() '10' on Windows 11")
+    elif system == "Darwin":
+        osr = macos_os_release()
+        # the name sat matches against distrib.pyconf (distro module: "Darwin" on macOS)
+        r = _run([probe.python, "-c", "import distro; print('NAME=' + distro.linux_distribution()[0])"], timeout=120)
+        m = re.search(r"^NAME=(.*)$", r.output, re.M)
+        if not m:
+            raise RuntimeError(f"{probe.python}: sat needs the `distro` module (pip install distro):\n{r.output[-800:]}")
+        distro_name = m.group(1).strip() or "Darwin"
+        plan = distro_support.macos_plan(sat_capabilities.known_distributions(sat_up), distro_name, macos_version())
+        family, dist, known = plan.family_obj(), plan.dist(macos_version()), False
+        if not shutil.which("brew"):
+            log.warning("Homebrew (brew) not found on PATH: native products cannot be checked nor installed")
+    else:
+        osr = linux_os_release()
+        if osr.name and not distro_support.sat_knows(sat_capabilities.known_distributions(sat_up), osr.name):
+            raise RuntimeError(f"sat does not know {osr.pretty_name or osr.id!r}: run a docker port of it first "
+                               "(it teaches sat the distribution), or use docker mode")
+        try:
+            family = family_for(osr)
+        except ValueError:
+            family = detect_family(lambda cmd: _run(["sh", "-c", cmd], timeout=600).ok)
+            if family is None:
+                raise
+        dist, distro_name, known = detect_dist("local", sat_up, osr, None, python=probe.python)
+    log.info("local platform: %s -> sat platform code %s (python %s, packages: %s)", osr.pretty_name, dist,
+             probe.python, family.name)
+
+    port_dir = work_root / "ports" / dist
+    branch, mode, sat_dir, sat_base, sal_dir, sal_base = _port_branches(cfg, sat_up, sal_up, port_dir, dist,
+                                                                        on_existing_branch)
+    if plan is not None:
+        sat_capabilities.ensure_distribution_support(sat_up, sat_dir, plan, sat_base, port_dir,
+                                                     prefix=cfg["git"].get("branch_prefix", "sat-agent/"))
+    elif not known:
+        sat_capabilities.ensure_distribution(sat_dir, distro_name.lower(), re.match(r"[A-Z]+", dist).group(0))
+    sat_capabilities.ensure_system_info_exclusions(sat_dir)
+    if system == "Darwin":
+        cfg["tests"]["use_xvfb"] = False                     # no Xvfb on macOS: tests use the display
+    env = LocalEnv(workdir=str(port_dir), home=str(port_dir / "home"), system=system, shell=probe.shell,
+                   vcvars=probe.vcvars, python=probe.python)
+    env.start()
+    sat = SatRunner(env, str(sat_dir), cfg["application"], cfg.get("sat_overrides", []),
+                    port_dir / "logs", make_jobs=(cfg.get("docker") or {}).get("make_jobs", 0))
+    ctx = PortContext(cfg=cfg, image="local", osr=osr, family=family, dist=dist, port_dir=port_dir,
+                      sat_dir=sat_dir, sat_salome_dir=sal_dir, sat_base=sat_base, sat_salome_base=sal_base,
+                      env=env, sat=sat, spec=None, arch=_machine_arch(), llm=llm, web=web, distro_name=distro_name)
+    ctx.logs_dir.mkdir(parents=True, exist_ok=True)
+    if system == "Windows" and not env.vcvars:
+        ctx.notes.append("no Visual Studio environment loaded (vcvars64.bat not found and sat-agent not started "
+                         "from a Visual Studio prompt): set execution.vcvars")
+        log.warning(ctx.notes[-1])
+    for repo in (sat_up, sal_up):
+        msg = _warn_crlf(repo)
+        if msg:
+            ctx.notes.append(msg)
+    _sat_init(ctx, branch)
+    wd = sat.app_var("APPLICATION.workdir")
+    if wd:
+        ctx.workdir = Path(wd)
+        log.info("application directory (sat): %s", ctx.workdir)
     return ctx

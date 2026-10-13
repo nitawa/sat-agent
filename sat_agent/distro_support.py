@@ -33,7 +33,7 @@ from sat_agent.logs import log
 from sat_agent.platform import SAT_DIST_CODES, SPECS, OSRelease, PkgFamily, SpecFamily, family_from_spec, \
     family_named, known_families
 
-VERSION_RULES = ("none", "major", "major.minor")
+VERSION_RULES = ("none", "major", "major.minor", "macos")
 NO_SUCH = "sat-agent-no-such-package"
 # package managers sat-agent has no entry for, named to the LLM when one of them is in the image
 _OTHER_MANAGERS = ("emerge", "eopkg", "swupd", "urpmi", "tdnf", "yum", "nix-env", "opkg", "slackpkg", "pkg",
@@ -71,7 +71,8 @@ class DistroPlan:
     def describe(self) -> str:
         what = f"derivative of {self.derivative_of}, keeps its code" if self.derivative_of else "new code"
         rule = {"none": "rolling release, no version", "major": "major version",
-                "major.minor": "major.minor version", "": "version rule of the parent"}[self.version_rule]
+                "major.minor": "major.minor version", "macos": "macOS major version (platform.mac_ver)",
+                "": "version rule of the parent"}[self.version_rule]
         return (f"{self.pretty or self.id}: sat name {self.sat_name!r} -> {self.code} ({what}); {rule}; "
                 f"package manager {self.family}" + (f"\n{self.evidence}" if self.evidence else ""))
 
@@ -332,3 +333,16 @@ def plan_support(image: str, osr: OSRelease, table: dict[str, str], llm, web, ca
     plan.save(cache)
     log.info("  %s", plan.describe().splitlines()[0])
     return plan
+
+
+def macos_plan(table: dict[str, str], sat_name: str, version: str) -> DistroPlan:
+    """macOS for sat: the name sat sees (the distro module reports "Darwin" there), a new
+    two-letter code, the macOS major version (not the kernel's), and Homebrew."""
+    from sat_agent.platform import SPECS
+
+    osr = OSRelease(id="macos", id_like=[], version_id=version, pretty_name=f"macOS {version}",
+                    name=sat_name or "Darwin")
+    known = next((c for k, c in table.items() if k in (sat_name or "darwin").lower()), None)
+    return DistroPlan(id="macos", pretty=f"macOS {version}", sat_name=(sat_name or "Darwin").lower(),
+                      code=known or make_code(osr, set(table.values())), family="brew", version_rule="macos",
+                      spec=SPECS["brew"], evidence="local macOS machine (platform.mac_ver), Homebrew")

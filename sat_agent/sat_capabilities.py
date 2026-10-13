@@ -91,7 +91,10 @@ SAT_REMOTE_MARK = "# sat-agent:"
 
 _RPM_LINE_RE = re.compile(r'^(    if dist_name in \[)([^\]]*)(\]: # linux using rpm)$', re.M)
 _VERSION_ANCHOR = '    elif distrib == "MG":\n'
-_VERSION_CODE = {"none": 'version=""', "major.minor": 'version=".".join(dist_version[:2])'}
+_VERSION_CODE = {"none": 'version=""', "major.minor": 'version=".".join(dist_version[:2])',
+                 # macOS: the distro module reports the Darwin kernel (24.1.0); the platform is the
+                 # macOS major version (15 for Sequoia)
+                 "macos": 'version=__import__("platform").mac_ver()[0].split(".")[0]'}
 
 
 def _splice(path: Path, anchor: str, code: str) -> None:

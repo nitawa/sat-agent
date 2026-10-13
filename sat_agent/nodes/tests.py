@@ -19,7 +19,8 @@ from sat_agent.agents.react import run_agent
 from sat_agent.logs import log
 from sat_agent.parsers import parse_ctest, strip_ansi
 from sat_agent.tools.common import make_common_tools
-from sat_agent.tools.test_tools import ACTIONABLE, TestSession, ctest_dirs, test_cmd, uses_salome_test
+from sat_agent.tools.test_tools import (ACTIONABLE, TestSession, ctest_dirs, env_file, launcher_file, test_cmd,
+                                        uses_salome_test)
 
 
 def _ctx(config):
@@ -31,14 +32,14 @@ def launcher(state, config):
     tests = dict(state.get("tests") or {})
     if uses_salome_test(ctx.sat.app_products()):
         r = ctx.sat.launcher("salome")
-        if r.ok and (ctx.app_workdir / "salome").exists():
+        if r.ok and launcher_file(ctx).exists():
             tests.update(runner="salome", dirs=None)
             return Command(update={"tests": tests}, goto="run_tests")
         what = "`sat launcher` failed"
     else:
         r = ctx.sat.environ()
         dirs = ctest_dirs(ctx)
-        if r.ok and (ctx.app_workdir / "env_launch.sh").exists() and dirs:
+        if r.ok and env_file(ctx).exists() and dirs:
             log.info("no KERNEL in %s: tests run with ctest in %s", ctx.app, ", ".join(dirs))
             tests.update(runner="ctest", dirs=dirs)
             return Command(update={"tests": tests}, goto="run_tests")
@@ -97,7 +98,7 @@ def analyze(state, config):
     session = TestSession(ctx, res, (state.get("tests") or {}).get("dirs"))
     system = prompts.fmt(prompts.TEST_SYSTEM, ctx, state.get("ref_dist"), state.get("platforms") or [])
     dirs = (state.get("tests") or {}).get("dirs")
-    how = (f"Tests run with ctest in {', '.join(dirs)} after `. {ctx.app_workdir}/env_launch.sh` "
+    how = (f"Tests run with ctest in {', '.join(dirs)} after loading {env_file(ctx)} "
            f"(no KERNEL in {ctx.app}, hence no salome launcher).\n\n" if dirs else "")
     task = (how + f"{len(res.failed)} of {len(res.tests)} tests failed in test cycle {state['tests']['cycle']}:\n"
             + "\n".join(f"- {t.name} ({t.status})" for t in res.failed[:200])

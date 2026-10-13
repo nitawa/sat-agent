@@ -10,10 +10,13 @@
     sat-agent -w /data/sat-agent port fedora:45   # another working directory than the config's
     sat-agent -w ~/bench/qwen3-32b port fedora:45 --batch --model qwen3:32b   # another model
     sat-agent bench ~/bench/*                # compare the token usage of those runs
+    sat-agent port --local --app SALOME-master-windows   # Windows: port this machine, without docker
+    sat-agent port --local                   # macOS / Linux: port this machine (brew / apt, dnf... with sudo)
 """
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -75,9 +78,46 @@ def ask_native(payload: dict) -> dict:
             return {"action": "remove"}
 
 
+def ask_missing_on_host(payload: dict) -> dict:
+    """Local mode: a native product whose packages are not installed on this machine."""
+    fam, embed = payload.get("family"), payload.get("embed") or {}
+    print("\n" + "=" * 78, file=sys.stderr)
+    print(f"{payload['product']}: {' '.join(payload['packages'])} not installed on this machine "
+          f"({payload.get('pretty')}), available with {fam}.", file=sys.stderr)
+    if payload.get("last_error"):
+        print(f"  ! {payload['last_error']}", file=sys.stderr)
+    print("=" * 78, file=sys.stderr)
+    if not sys.stdin.isatty():
+        return {"action": "source" if payload.get("buildable") else "skip"}
+    src = (f"[s]ource build ({embed['tag']}"
+           + (", with the Homebrew formula's patches" if fam == "brew" else "") + ") / ") \
+        if payload.get("buildable") else ""
+    while True:
+        ans = input(f"[i]nstall with {fam} / {src}[k]eep it missing ? ").strip().lower()
+        if ans.startswith("i"):
+            return {"action": "install"}
+        if ans.startswith("s") and src:
+            return {"action": "source"}
+        if ans.startswith("k"):
+            return {"action": "skip"}
+
+
+def make_ask_install(batch: bool, cfg: dict):
+    """Approval of an install on this machine outside the per-product question (a renamed package,
+    the agent's install_system_packages): a yes/no question, policy.local_install in batch."""
+    def ask(pkgs: list[str], reason: str = "") -> bool:
+        if batch or not sys.stdin.isatty():
+            return cfg["policy"].get("local_install", "no") == "yes"
+        ans = input(f"\nInstall on this machine{f' ({reason})' if reason else ''}: {' '.join(pkgs)} ? [y/N] ")
+        return ans.strip().lower().startswith("y")
+    return ask
+
+
 def ask_gate(payload: dict) -> dict:
     if payload.get("kind") == "native_product":
         return ask_native(payload)
+    if payload.get("kind") == "missing_on_host":
+        return ask_missing_on_host(payload)
     print("\n" + "=" * 78, file=sys.stderr)
     print(f"Build agent stopped: {payload.get('phase')} of {payload.get('product') or 'the platform'}",
           file=sys.stderr)
@@ -204,7 +244,7 @@ def start_trace(args, cfg: dict) -> None:
 
 def cmd_port(args) -> int:
     from sat_agent import request as rq
-    from sat_agent.context import open_port
+    from sat_agent.context import open_local_port, open_port
     from sat_agent.git_workspace import BranchInUse
     from sat_agent.graph import build_graph
     from sat_agent.llm import LLMClient, run_usage
@@ -213,6 +253,16 @@ def cmd_port(args) -> int:
     from sat_agent.docker_env import docker_available
 
     cfg = get_config(args)
+    local = getattr(args, "local", False) or (cfg.get("execution") or {}).get("backend") == "local"
+    if local:
+        if args.image and args.image != "local":
+            log.error("--local ports this machine itself: no IMAGE (%s)", args.image)
+            return 2
+        args.image = "local"
+    elif os.name == "nt" or sys.platform == "darwin":
+        log.error("on Windows and macOS, sat-agent ports this machine itself without docker: use "
+                  "`sat-agent port --local`")
+        return 2
     start_trace(args, cfg)
     llm = LLMClient(cfg["llm"]) if cfg["llm"].get("base_url") and cfg["llm"].get("model") else None
     try:
@@ -229,15 +279,19 @@ def cmd_port(args) -> int:
     if args.dry_run:
         print(json.dumps(req.to_dict(), indent=1, ensure_ascii=False))
         return 0
-    if not docker_available():
+    if not local and not docker_available():
         log.error("docker is not available (docker info failed)")
         return 2
     if llm is None:
         log.warning("no LLM configured: failures will go straight to the failure gate")
     rq.save(req, Path(cfg["paths"]["work_root"]))
     try:
-        ctx = open_port(cfg, req.image, llm=llm, web=Web(cfg["web_search"]),
-                        on_existing_branch=branch_decision(args))
+        if local:
+            ctx = open_local_port(cfg, llm=llm, web=Web(cfg["web_search"]), on_existing_branch=branch_decision(args))
+            ctx.ask_install = make_ask_install(args.batch, cfg)
+        else:
+            ctx = open_port(cfg, req.image, llm=llm, web=Web(cfg["web_search"]),
+                            on_existing_branch=branch_decision(args))
     except BranchInUse as e:
         log.error("%s: use --new-branch or --continue-branch", e)
         return 2
@@ -260,7 +314,7 @@ def cmd_port(args) -> int:
     try:
         final = drive(app, inp, config)
     except KeyboardInterrupt:
-        log.warning("interrupted; resume with: sat-agent port %s --resume", req.image)
+        log.warning("interrupted; resume with: sat-agent port %s --resume", "--local" if local else req.image)
         return 130
     if final.get("report_path"):
         print(Path(final["report_path"]).read_text(encoding="utf-8"))
@@ -337,6 +391,10 @@ def main(argv=None) -> int:
     pp.add_argument("--trace-file", metavar="FILE", help="like --trace, to FILE")
     pp.add_argument("--verify-dockerfile", action="store_true",
                     help="rebuild the exported Dockerfile from scratch at the end and re-check it")
+    pp.add_argument("--local", action="store_true",
+                    help="port this machine itself, without docker: sat runs here. Windows: cmd / PowerShell / "
+                         "Python, Visual Studio, no system packages; macOS: Homebrew; Linux: its package manager "
+                         "(sudo). Nothing is installed without your approval")
     pp.add_argument("--model", help="LLM model (overrides llm.model of the config file)")
     pp.add_argument("--llm-base-url", metavar="URL",
                     help="OpenAI-compatible endpoint (overrides llm.base_url of the config file)")

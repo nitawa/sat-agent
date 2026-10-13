@@ -73,12 +73,62 @@ Group tests sharing a cause into one report (tests=[...]). Then call finish(summ
 """
 
 
+WINDOWS = """
+THIS PLATFORM IS WINDOWS ({dist}, {pretty}), NOT LINUX. These rules override the Linux advice above:
+- sat runs directly on this machine (no container). There are NO system packages: every product,
+  prerequisites included, is built and installed by sat from the application ({app}). Never look
+  for, install or rename a system package; something missing comes from a product of the application
+  (missing, wrong version, not in the environment) or from the Visual Studio toolchain.
+- Commands are DOS (cmd.exe), PowerShell or Python, never bash: run_shell(command, shell='cmd' |
+  'powershell' | 'python'). The Visual Studio environment (vcvars64) is loaded: cl, link, msbuild,
+  cmake, ctest are on PATH. Paths use backslashes; environment variables are %VAR% in cmd,
+  $env:VAR in PowerShell.
+- Build scripts are batch files (compil_scripts/*.bat, run by cmd.exe) selected through
+  `compil_script : '<name>' + $VARS.scriptExtension`; add_compil_script writes <product>_{suffix}.bat.
+- sat merges a product's `default_win` / `<section>_win` sections on EVERY Windows version: never
+  rely on editing them; the tools write sections <section>_{suffix} selected for {dist} only.
+- Tests: no Xvfb on Windows; `salome.bat test` or ctest after `call env_launch.bat`.
+- Typical Windows failures: MSVC errors (error C2065, C1083: cannot open include file, LNK2019
+  unresolved external symbol, LNK1104 cannot open file x.lib), a newer MSVC toolset rejecting old
+  code, the CMake generator (APPLICATION.cmake_generator, e.g. 'Visual Studio 17 2022'), DLLs not
+  found at run time (PATH), long paths, CRLF/LF issues in sources. Prefer a CMake option or another
+  product version, then a minimal upstream patch.
+"""
+
+
+MACOS = """
+THIS PLATFORM IS macOS ({dist}, {pretty}), on the maintainer's own machine (no container):
+- Native products are Homebrew formulae (system_info.brew / brew_dev for {dist}); check them with
+  search_packages / run_shell (`brew info <f>`, `brew list --versions <f>`, `brew --prefix <f>`).
+  Installing one modifies the maintainer's machine: it needs their approval (the tool asks).
+- Toolchain: Apple clang (not gcc), libc++, ld64, frameworks; Homebrew prefix /opt/homebrew (arm64)
+  or /usr/local (x86_64), keg-only formulae (qt@5, openssl@3, llvm...) need their prefix given to
+  CMake (e.g. -DCMAKE_PREFIX_PATH=$(brew --prefix qt@5) through a platform option, never a local
+  path in sat_salome). Run time: @rpath / install_name_tool, DYLD_* is stripped by SIP.
+- A product built from sources instead of its formula: the formula's patches for that version are
+  already registered; its build arguments are in the task when it fails.
+- No Xvfb: tests use the display.
+"""
+
+LOCAL = """
+sat runs on the maintainer's own machine ({pretty}), not in a container: installing a package
+modifies it and needs their approval (the tool asks); prefer options and patches when both work.
+"""
+
+
 def fmt(template: str, ctx, ref: str | None, platforms: list[str]) -> str:
     """System prompt for this port, followed by the maintainer's instructions if any."""
     others = ", ".join(p for p in platforms if p != ctx.dist) or "none"
+    if getattr(ctx.env, "windows", False):
+        template += WINDOWS
+    elif getattr(ctx.env, "system", "") == "Darwin":
+        template += MACOS
+    elif getattr(ctx, "local", False):
+        template += LOCAL
     return template.format(dist=ctx.dist, pretty=ctx.osr.pretty_name, family=ctx.family.name,
                            k_run=ctx.family.sat_keys[0], k_dev=ctx.family.sat_keys[1], ref=ref or "none",
-                           ref_suffix=(ref or "").replace(".", "_"), others=others, suffix=ctx.suffix) + getattr(ctx, "guidance", "")
+                           ref_suffix=(ref or "").replace(".", "_"), others=others, suffix=ctx.suffix,
+                           app=ctx.app) + getattr(ctx, "guidance", "")
 
 
 GUIDANCE_TASK = """\

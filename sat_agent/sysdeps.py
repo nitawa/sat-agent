@@ -143,7 +143,7 @@ def pick_candidate(pkg: str, candidates: list[tuple[str, str]], llm=None) -> str
 def find_replacement(ctx, pkg: str) -> str | None:
     candidates: list[tuple[str, str]] = []
     for pat in name_patterns(pkg, ctx.family.name):
-        out = ctx.env.exec(ctx.family.search_cmd(pat), root=True, timeout=600).output
+        out = ctx.env.exec(ctx.family.search_cmd(pat), root=not getattr(ctx, 'local', False), timeout=600).output
         for c in ctx.family.parse_search(out):
             if c not in candidates:
                 candidates.append(c)
@@ -293,6 +293,9 @@ def resolve_missing(ctx, missing: list[str], report: SysdepsReport) -> list[str]
         unresolved += _virtual_installs(ctx, installed, report)
     ko += [p for p in missing if not status.get(p)]
     for pkg in ko:
+        if pkg in getattr(ctx, "host_refused", ()):
+            unresolved.append(pkg)            # exists, not installed on this machine by choice: no rename
+            continue
         new = find_replacement(ctx, pkg)
         if new:
             inst, _ = ctx.install_packages([new], f"replaces {pkg}")
@@ -364,7 +367,7 @@ def _source_family(ctx, ref_dockerfile: Path) -> str | None:
 
 
 # naming conventions of the target families: development package suffix, python prefix
-_NAMING = {"pacman": ("", "python-"), "apk": ("-dev", "py3-"), "xbps": ("-devel", "python3-"),
+_NAMING = {"brew": ("", ""), "pacman": ("", "python-"), "apk": ("-dev", "py3-"), "xbps": ("-devel", "python3-"),
            "dnf": ("-devel", "python3-"), "zypper": ("-devel", "python3-"), "apt": ("-dev", "python3-")}
 
 
@@ -381,6 +384,8 @@ def heuristic_names(name: str, src: str, target: str) -> list[str]:
         base = re.sub(r"-(devel|libs|static|headers)$", "", n)
         if target == "pacman":
             base = re.sub(r"^(qt[56])-qt", r"\1-", base)                    # qt5-qtbase -> qt5-base
+        if target == "brew":
+            base = re.sub(r"^qt([56])-qt\w+$", r"qt@\1", base)            # qt5-qtbase -> qt@5
     else:
         dev = n.endswith("-dev")
         base = re.sub(r"t64$", "", re.sub(r"-(dev|bin|common|data|tools|runtime)$", "", n))
@@ -445,7 +450,7 @@ def lookup_on_web(ctx, name: str, src: str) -> tuple[str | None, str]:
             terms = list(dict.fromkeys([project.lower(), re.sub(r"-(devel|dev|libs)$", "", name)]))
             repo = []
             for t in terms:
-                for c in ctx.family.parse_search(ctx.env.exec(ctx.family.search_cmd(t), root=True,
+                for c in ctx.family.parse_search(ctx.env.exec(ctx.family.search_cmd(t), root=not getattr(ctx, 'local', False),
                                                               timeout=600).output):
                     if c not in repo:
                         repo.append(c)

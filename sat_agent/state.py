@@ -35,6 +35,7 @@ class PortState(TypedDict, total=False):
     failure: Optional[Failure]
     pending: dict              # {"prepare": [...], "compile": [...]} after a fix
     native_choices: list[dict] # native products without a package on the platform, to decide
+    local_installs: dict       # local mode: package -> "install" | "source" | "skip" (maintainer's answers)
     hint: Optional[str]        # human hint from the failure gate
 
     fixes: list[dict]          # applied fixes (phase, product, summary, actions, patches, packages)
@@ -54,6 +55,6 @@ class PortState(TypedDict, total=False):
 def initial_state(run_id: str, dist: str, batch: bool, stop_after: str | None = None) -> PortState:
     return PortState(run_id=run_id, dist=dist, batch=batch, stop_after=stop_after, ref_dist=None, platforms=[],
                      done={}, sysdeps={}, attempts={}, failure=None, pending={}, native_choices=[], hint=None,
-                     fixes=[], gave_up=[], skipped=[], build_status="running",
+                     fixes=[], gave_up=[], skipped=[], build_status="running", local_installs={},
                      tests={"cycle": 0, "results": {}, "logs": []}, feedback=[], test_reports=[],
                      fatal=None, aborted=False, report_path=None)

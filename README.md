@@ -258,6 +258,84 @@ The previous hand-rolled implementation is kept in `legacy/` for reference.
 
 ---
 
+## Local mode (`--local`, no docker): Windows, macOS, Linux
+
+`sat-agent port --local` ports **the machine itself**: sat runs here, not in a container, and
+what the machine is decides the rest (`platform.system()`). It is the only mode on Windows and
+macOS. **Nothing is installed on the machine without your approval.**
+
+### macOS
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e . distro
+.venv/bin/sat-agent --config config.json port --local
+```
+
+- **Platform**: sat does not know macOS. As for any new distribution, sat-agent teaches it on the
+  dedicated branch `sat-agent/distro-macos` of sat (merged into the port branch): the name sat sees
+  (`Darwin`, from the distro module) → a new code (`MA`), the version from `platform.mac_ver()`
+  (the macOS major version: `MA15`, not the Darwin kernel's 24), and Homebrew as package manager
+  (sat checks a native product with `brew list --formula --versions <formula>`).
+- **Native products are Homebrew formulae**: the reference platform's rpm names are translated
+  (`boost-devel` → `boost`, `python3-numpy` → `numpy`, `qt5-qtbase-devel` → `qt@5`, then the LLM),
+  every guess checked with `brew info`, and declared for the platform only
+  (`system_info."MA15".brew/brew_dev`).
+- **A native product not installed on the Mac**: sat-agent asks, per product —
+  `[i]nstall with brew / [s]ource build / [k]eep it missing`:
+  - *install*: `brew install --formula …` (as you: brew refuses root);
+  - *source*: the product is built from sources on this platform only (as with `embed`), and
+    sat-agent reads its **Homebrew formula** (`brew cat`, else homebrew-core on GitHub): the
+    patches Homebrew applies on macOS (`patch do url/sha256/directory`, `patch :p0`, `patch :DATA`;
+    not those of `on_linux`, `head` or `resource` blocks) are downloaded, checked against their
+    sha256, rewritten for sat's `patch -p1` and **registered in sat_salome**
+    (`products/patches/<product>-brew-<formula>-<n>-MA15.patch`, in the product's `<section>_MA15`).
+    The formula's version is built when the product knows it (`version_<x>` section), so the
+    patches apply as Homebrew applies them; patches written for another version are kept in
+    `ports/MA15/brew/` and named in the report. Homebrew's build arguments (`-D…`, `--…`) and
+    `inreplace` edits are given to the build agent if the product then fails (`ports/MA15/brew/<product>.json`).
+  - `--batch`: `policy.missing_on_host` (`source` by default, or `install`).
+- No Xvfb: tests use the display.
+
+### Linux
+
+`--local` on Linux works the same way on the distribution of `/etc/os-release` (sat must know it:
+a docker port teaches sat a new one). Package queries run as you; installs ask, then use `sudo`
+(`sudo -n` without a terminal). The reference platform's Dockerfile is not installed on your
+machine: only what `sat config --check_system` reports missing, product by product, with the same
+install / source build / keep question. Other installs (a renamed package, the agent's
+`install_system_packages`) ask yes/no (`--batch`: `policy.local_install`, `no` by default).
+
+### Windows
+
+On Windows, sat-agent ports **the machine itself**, without docker:
+
+```bat
+python -m venv .venv && .venv\Scripts\pip install -e . distro
+.venv\Scripts\sat-agent --config config.json port --local --app SALOME-master-windows --batch
+```
+
+- **Platform**: the code sat computes on this machine (`src/architecture.py`: `W` + `platform.release()`,
+  e.g. `W11`; Python < 3.12 reports `10` on Windows 11, a warning says so). The reference is
+  another Windows version of the application, never a Linux platform.
+- **No system packages**: the `*-windows` applications build every product with sat, so there is no
+  `check_system`, no package tool for the agents, no Dockerfile. The `sysdeps` step is skipped.
+- **Commands** are cmd (DOS), PowerShell or Python, never bash: `execution.shell` is the default
+  (`cmd`); the agents' `run_shell` takes `shell='cmd'|'powershell'|'python'`. Multi-line Python and
+  batch go through a temporary file, PowerShell through `-EncodedCommand`. Every command runs in the
+  **Visual Studio environment**: `execution.vcvars` (`auto` = the newest VS with the x64 C++ tools,
+  found with vswhere; `""` when sat-agent is started from a "x64 Native Tools" prompt).
+- **Build scripts** written by the agent are batch files `compil_scripts/<product>_W11.bat`
+  (sat selects `<name>$VARS.scriptExtension`); changes stay platform-scoped as on Linux
+  (`__overwrite__` block `VARS.dist in ['W11']`, sections `<section>_W11`); the application's
+  workdir is asked to sat (`$LOCAL.workdir/$APPLICATION.name` for the Windows applications).
+- **Files** sat-agent writes keep LF line ends (as in the repositories); keep
+  `git config core.autocrlf input` (or `false`) in sat and sat_salome — sat-agent warns otherwise.
+- Requirements: Git for Windows, Python 3.10+ with `distro` (sat imports it on Windows too),
+  Visual Studio with the C++ x64 tools, CMake. Tests: `salome.bat test` or ctest after
+  `env_launch.bat` (no Xvfb).
+
+---
+
 ## Install & configure
 
 ```bash

@@ -19,7 +19,7 @@ class GitError(RuntimeError):
 
 
 def git(repo: Path | str, *args: str, check: bool = True) -> str:
-    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, encoding="utf-8", errors="replace")
     if check and r.returncode != 0:
         raise GitError(f"git {' '.join(args)} in {repo}: {r.stderr.strip() or r.stdout.strip()}")
     return r.stdout.strip()
@@ -149,7 +149,7 @@ def changed_files(path: Path, base: str) -> list[tuple[str, str]]:
 
 
 def file_at(path: Path, base: str, rel: str) -> str | None:
-    r = subprocess.run(["git", "-C", str(path), "show", f"{base}:{rel}"], capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", str(path), "show", f"{base}:{rel}"], capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.stdout if r.returncode == 0 else None
 
 
@@ -168,7 +168,7 @@ def snapshot(path: Path) -> dict[str, bytes | None]:
     """Content of every file differing from HEAD (modified, added, untracked; None = deleted)."""
     # not git(): it strips the output, and the first entry's status starts with a space (" M path")
     out = subprocess.run(["git", "-C", str(path), "status", "--porcelain", "-z", "--untracked-files=all"],
-                         capture_output=True, text=True).stdout
+                         capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
     snap: dict[str, bytes | None] = {}
     items = out.split("\0")
     i = 0

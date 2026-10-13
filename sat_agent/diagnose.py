@@ -76,7 +76,7 @@ def _candidates(ctx, kind: str, name: str) -> list[str]:
     fam = ctx.family
 
     def provides(path: str) -> list[str]:
-        return fam.parse_provides(ctx.env.exec(fam.provides_cmd(path), root=True, timeout=900).output)
+        return fam.parse_provides(ctx.env.exec(fam.provides_cmd(path), root=not getattr(ctx, 'local', False), timeout=900).output)
 
     if kind == "headers":
         return provides(name)
@@ -92,7 +92,7 @@ def _candidates(ctx, kind: str, name: str) -> list[str]:
         found = provides(f"{name}Config.cmake") or provides(f"{name.lower()}-config.cmake") \
             or provides(f"pkgconfig/{name.lower()}.pc")
         if not found:
-            out = ctx.env.exec(fam.search_cmd(name.lower()), root=True, timeout=600).output
+            out = ctx.env.exec(fam.search_cmd(name.lower()), root=not getattr(ctx, 'local', False), timeout=600).output
             found = [n for n, _ in fam.parse_search(out)]
             dev = [n for n in found if n.endswith(("-dev", "-devel"))]
             found = (dev or found)[:8]
@@ -105,6 +105,14 @@ def pre_analysis(ctx, product: str | None, log_text: str, web: bool = True) -> s
     out = []
     missing = missing_items(log_text)
     lines = []
+    if not ctx.family.system_packages:
+        # Windows: what is missing comes from a product of the application (or the toolchain)
+        lines = [f"- {kind[:-1]} `{name}`" for kind, names in missing.items() for name in names[:4]]
+        if lines:
+            out += ["Reported missing in the log (no system packages on this platform: it must come from a "
+                    "product of the application, its dependencies/environment, or the Visual Studio "
+                    "toolchain):"] + lines
+        missing = {}
     for kind, names in missing.items():
         for name in names[:4]:
             try:

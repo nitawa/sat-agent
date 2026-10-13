@@ -39,15 +39,19 @@ def _verify_dockerfile(ctx) -> str:
 
 def finalize(state, config):
     ctx = config["configurable"]["ctx"]
-    exported = ctx.sat_salome_dir / "dockers" / ctx.dockerfile_name
-    exported.parent.mkdir(parents=True, exist_ok=True)
-    exported.write_text(ctx.spec.render(), encoding="utf-8")
-    log.info("Dockerfile exported to %s", exported)
-    verify = _verify_dockerfile(ctx) if ctx.cfg["docker"].get("verify_dockerfile") else "not run"
+    local = getattr(ctx, "local", False) or ctx.spec is None
+    if local:
+        verify = "no Dockerfile (local mode)"
+    else:
+        exported = ctx.sat_salome_dir / "dockers" / ctx.dockerfile_name
+        exported.parent.mkdir(parents=True, exist_ok=True)
+        exported.write_text(ctx.spec.render(), encoding="utf-8")
+        log.info("Dockerfile exported to %s", exported)
+        verify = _verify_dockerfile(ctx) if ctx.cfg["docker"].get("verify_dockerfile") else "not run"
     violations = ctx.guard_violations()
     commit_error = None
     try:
-        ctx.commit(f"Port of {ctx.app} to {ctx.dist}: platform Dockerfile {ctx.dockerfile_name}")
+        ctx.commit(f"Port of {ctx.app} to {ctx.dist}" + ("" if local else f": platform Dockerfile {ctx.dockerfile_name}"))
     except GuardViolation as e:
         commit_error = str(e)
     report = render_report(ctx, state, verify, violations, commit_error)
@@ -97,12 +101,15 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
         f"# SALOME port to {ctx.dist} — {ctx.osr.pretty_name}",
         "",
         f"- date: {time.strftime('%Y-%m-%d %H:%M')}",
-        f"- image: `{ctx.image}` (package family {ctx.family.name})",
+        (f"- machine: this one, without docker ({ctx.osr.pretty_name}, "
+         + (f"packages: {ctx.family.name})" if ctx.family.system_packages else "no system packages)")
+         if getattr(ctx, "local", False) else f"- image: `{ctx.image}` (package family {ctx.family.name})"),
         f"- application: `{ctx.app}`, reference platform: `{state.get('ref_dist') or 'none'}`",
         f"- build: **{status}**",
         f"- tests: {len(results) - len(failed)}/{len(results)} passed after {tests.get('cycle', 0)} cycle(s)"
         if results else "- tests: not run",
-        f"- Dockerfile: `dockers/{ctx.dockerfile_name}` (verification: {verify})",
+        (f"- Dockerfile: none ({verify})" if getattr(ctx, "local", False) else
+         f"- Dockerfile: `dockers/{ctx.dockerfile_name}` (verification: {verify})"),
         f"- branches: `{ctx.cfg['git'].get('branch_prefix', 'sat-agent/')}{ctx.dist}` in `{ctx.sat_dir}` and "
         f"`{ctx.sat_salome_dir}`",
         f"- build tree: `{ctx.app_workdir}`",
@@ -120,8 +127,19 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
     lines += ["", "### sat_salome changes", "", "```", gw.diff_stat(ctx.sat_salome_dir, ctx.sat_salome_base) or
               "(none)", "```", "", "### sat changes (generic, review for upstreaming)", ""]
     lines += [f"- {c}" for c in sat_changes(ctx.sat_dir, ctx.sat_base)] or ["- none"]
+    local = getattr(ctx, "local", False)
     lines += ["", "## System prerequisites", "",
-              f"- installed: {len(sd.get('installed', []))} package(s) (all in the Dockerfile)"]
+              "- none on this platform: every product is built by sat" if not ctx.family.system_packages else
+              f"- installed: {len(sd.get('installed', []))} package(s)"
+              + (" on this machine" if local else " (all in the Dockerfile)")]
+    by_choice: dict[str, list[str]] = {}
+    for pkg, choice in sorted((state.get("local_installs") or {}).items()):
+        by_choice.setdefault(choice, []).append(pkg)
+    for choice, what in (("install", "installed on this machine with your approval"),
+                         ("source", "built from sources instead (product embedded on this platform)"),
+                         ("skip", "left missing on this machine")):
+        if by_choice.get(choice):
+            lines.append(f"- {what}: " + ", ".join(f"`{p}`" for p in by_choice[choice]))
     if sd.get("replaced"):
         lines += ["- renamed on this release:"] + [f"  - `{a}` → `{b}`" for a, b in sorted(sd["replaced"].items())]
     if sd.get("unresolved"):
@@ -169,8 +187,12 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
     lines += ["", "## Next steps", "",
               f"1. Review the branches (`git log {ctx.cfg['git'].get('branch_prefix', 'sat-agent/')}{ctx.dist}`)"
               " in sat and sat_salome, then merge them.",
-              f"2. Reproduce: `docker build -t salome-{ctx.dist.lower()} -f dockers/{ctx.dockerfile_name} .` and "
-              "follow dockers/README.md.", ""]
+              (f"2. Reproduce on a {ctx.osr.pretty_name} machine: `sat prepare` / `sat compile {ctx.app}`"
+               + (" from a Visual Studio x64 prompt." if ctx.windows else
+                  f", after installing the {ctx.family.name} packages declared for {ctx.dist}.")
+               if getattr(ctx, "local", False) else
+               f"2. Reproduce: `docker build -t salome-{ctx.dist.lower()} -f dockers/{ctx.dockerfile_name} .` and "
+               "follow dockers/README.md."), ""]
     if state.get("fatal"):
         lines += ["## Fatal error", "", "```", state["fatal"], "```", ""]
     return "\n".join(lines)

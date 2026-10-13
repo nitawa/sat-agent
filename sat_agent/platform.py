@@ -47,6 +47,11 @@ class PkgFamily:
     sat_backend: str = ""
     sat_check: tuple[str, ...] = ()
 
+    @property
+    def system_packages(self) -> bool:
+        """False for platforms without system prerequisites (Windows: sat builds every product)."""
+        return self.name != "none"
+
     # --- commands (all run as root inside the target container) -------------
     def refresh_cmd(self) -> str:
         return {"apt": "apt-get update -q",
@@ -214,6 +219,12 @@ PACMAN = PkgFamily(
                "xorg-xauth", "wget", "curl", "rsync", "chrpath", "file"),
 )
 
+# Windows: no system package at all. SALOME's `*-windows` applications build every product
+# (prerequisites included) with sat, which checks no system package there; nothing to install,
+# check, search or declare.
+NO_PACKAGES = PkgFamily(name="none", sat_keys=("", ""), bootstrap=())
+
+
 @dataclass(frozen=True)
 class SpecFamily(PkgFamily):
     """A package manager described as data (commands with {pkg}, {pkgs}, {term}, {path} fields):
@@ -306,6 +317,23 @@ SPECS = {
         "bootstrap": ["ca-certificates", "git", "python3", "python3-distro", "python3-pip", "base-devel",
                       "gcc-fortran", "cmake", "patch", "bash", "findutils", "procps-ng", "xorg-server-xvfb", "xauth",
                       "wget", "curl", "rsync", "chrpath", "file", "glibc-locales"],
+    },    # macOS (local mode only, never in a container): Homebrew formulae. Runs as the user (brew
+    # refuses root). `brew list --versions` exits 0 only for an installed formula: that is the check
+    # sat is taught (sat_capabilities.add_package_manager, "each" mode).
+    "brew": {
+        "name": "brew", "binary": "brew",
+        "refresh": "brew update --quiet",
+        "install": "brew install --formula {pkgs}",
+        "available": "brew info --formula {pkg} >/dev/null 2>&1",
+        "installed": "brew list --formula --versions {pkg} >/dev/null 2>&1",
+        "search": "brew search --formula {term}",
+        "search_regex": r"^(?P<name>[A-Za-z0-9][\w@.+-]*)$",
+        "provider": "",
+        "file_owner": "",
+        "cleanup": "brew cleanup",
+        "sat_check": ["each", "brew", "list", "--formula", "--versions"],
+        "probe_installed": "", "probe_available": "cmake",
+        "bootstrap": [],
     },
 }
 
@@ -319,6 +347,8 @@ def known_families() -> list[PkgFamily]:
 def family_named(name: str, spec: dict | None = None) -> PkgFamily:
     if spec:
         return family_from_spec(spec)
+    if name == NO_PACKAGES.name:
+        return NO_PACKAGES
     for fam in known_families():
         if fam.name == name:
             return fam
@@ -430,6 +460,9 @@ def choose_reference_platform(target: str, platforms: list[str], family: PkgFami
         return older[-1]
     if same:
         return same[-1]
+    if not family.system_packages:
+        # Windows: only another Windows version can be a reference, never a Linux platform
+        return None
     # pacman: Fedora's package versions are the closest to a rolling release's, and its
     # names (minus -devel) the closest to Arch's
     family_codes = {"apt": ("UB", "DB"), "dnf": ("FD", "CO"), "zypper": ("OS", "FD", "CO")}.get(

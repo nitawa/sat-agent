@@ -53,6 +53,19 @@ No lint config; `python -m pyflakes sat_agent` is used to keep imports clean.
   than "port <app> to <target>"; `edit_source` only edits under `SOURCES/<product>` of a product of
   the application (it once patched sat itself with `product='../../../sat'`); tool outputs are
   cleaned of lone surrogates (`react.clean_text`) before being stored or sent.
+- macOS (local only): `distro_support.macos_plan` (sat name from the distro module, new code, version
+  rule "macos" = `platform.mac_ver()` major, spec family `platform.SPECS["brew"]`). Local mode asks
+  per product in `system_deps` → `native_choices` (`kind: missing_on_host`, answers in
+  `state.local_installs`); "source" embeds the product and, with brew, `nodes/build._brew_sources`
+  registers the formula's macOS patches (`brew.py`: parse, sha256, -p1). `PortContext.install_packages`
+  never installs on the machine without approval (`ask_install`, `host_approved`); package queries
+  run as the user in local mode (`root=not ctx.local`), installs with sudo on Linux.
+- Local mode (`port --local`: Windows, macOS, Linux): `context.open_local_port` + `local_env.LocalEnv`
+  (same interface as DockerEnv: exec/start/stop, plus `kind`, `windows`, `quote`, `python`; build
+  command lines with `env.quote`, never `shlex.quote`, when they may run on Windows). Family
+  `platform.NO_PACKAGES` (`family.system_packages` False): no check_system, no package tools, no
+  Dockerfile (`ctx.spec` None). Path checks must use `Path.parents`, never `str + "/"`; patches use
+  `as_posix()`; `sat_agent/__init__.py` makes `Path.write_text` keep LF on Windows.
 - Tests: `salome test` needs KERNEL; without it (MEDCOUPLING) `nodes/tests.launcher` runs
   `sat environ` and the tests run with ctest in `INSTALL/*/bin/salome/test` (`state.tests.dirs`).
 - Token usage: `LLMClient` counts per phase (`llm.phase_of` of the `caller` label) and, once
