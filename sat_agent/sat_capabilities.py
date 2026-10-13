@@ -94,7 +94,10 @@ _VERSION_ANCHOR = '    elif distrib == "MG":\n'
 _VERSION_CODE = {"none": 'version=""', "major.minor": 'version=".".join(dist_version[:2])',
                  # macOS: the distro module reports the Darwin kernel (24.1.0); the platform is the
                  # macOS major version (15 for Sequoia)
-                 "macos": 'version=__import__("platform").mac_ver()[0].split(".")[0]'}
+                 "macos": 'version=__import__("platform").mac_ver()[0].split(".")[0]',
+                 # MSYS2: the distro module reports uname (MINGW64_NT-10.0-26100, msys runtime 3.x);
+                 # the platform is the environment (MSYS_UCRT64)
+                 "msystem": 'version="_" + __import__("os").environ.get("MSYSTEM", "MSYS").upper()'}
 
 
 def _splice(path: Path, anchor: str, code: str) -> None:

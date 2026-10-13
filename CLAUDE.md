@@ -60,6 +60,16 @@ No lint config; `python -m pyflakes sat_agent` is used to keep imports clean.
   registers the formula's macOS patches (`brew.py`: parse, sha256, -p1). `PortContext.install_packages`
   never installs on the machine without approval (`ask_install`, `host_approved`); package queries
   run as the user in local mode (`root=not ctx.local`), installs with sudo on Linux.
+- MSYS2 (local only, Windows, `port --msys2 <root>`): `LocalEnv(system="MSYS2")` runs `bash.exe -lc`
+  with `MSYSTEM` (`--msystem`, else the console's: `local_env.detect_msystem` = MSYSTEM of
+  sat-agent's console, `msys2.ini`, installed `<env>/bin/gcc.exe`; UCRT64, MINGW64); sat runs
+  with MSYS2's `/usr/bin/python3` (the `/ucrt64` one is a Windows python: sat would see W11).
+  `distro_support.msys2_plan`: uname key (`mingw64_nt`), code `MSYS`, version rule "msystem" → `MSYS_UCRT64`, family `msys2` (`platform.msys2_spec`: pacman, names prefixed by
+  `MSYS2_ENVS[...]["package_prefix"]`, `heuristic_names(prefix=)`). Paths to sat go through
+  `env.posix_path` (`/c/...`), paths from sat through `env.host_path` (SatRunner does it).
+  Started from an MSYS2 build console (`local_env.msys2_console`: MSYSTEM + `<root>/usr/bin` on PATH),
+  `port`/`port --local` is MSYS2 without `--msys2` (`off` disables); sat-agent itself on the msys
+  python is refused (`under_msys_runtime`).
 - Local mode (`port --local`: Windows, macOS, Linux): `context.open_local_port` + `local_env.LocalEnv`
   (same interface as DockerEnv: exec/start/stop, plus `kind`, `windows`, `quote`, `python`; build
   command lines with `env.quote`, never `shlex.quote`, when they may run on Windows). Family

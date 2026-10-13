@@ -25,6 +25,7 @@ import re
 from pathlib import Path
 
 from sat_agent import git_workspace as gw
+from sat_agent.local_env import msys2_posix
 from sat_agent.platform import section_suffix
 
 _pyconf_mod = None
@@ -125,6 +126,10 @@ _NEW_ONLY_DIRS = ("products/patches/", "products/compil_scripts/", "products/env
 
 def _local_paths(repo: Path, sat_dir: Path) -> list[str]:
     roots = {str(Path.home()), str(Path(repo).resolve()), str(Path(sat_dir).resolve())}
+    for r in list(roots):
+        if re.match(r"^[A-Za-z]:[\\/]", r):
+            # Windows: also written C:/Users/..., and /c/Users/... by MSYS2
+            roots |= {r.replace("\\", "/"), msys2_posix(r)}
     return sorted((r for r in roots if len(r) > 1), key=len, reverse=True)
 
 

@@ -1,5 +1,7 @@
 """System prompts of the build agent and the test agent."""
 
+from sat_agent.platform import MSYS2_ENVS
+
 CONVENTIONS = """\
 SAT conventions you must respect (sat_salome):
 - The new platform is {dist} ({pretty}); package family {family} (sat reads system_info.{k_run}/{k_dev}).
@@ -110,6 +112,32 @@ THIS PLATFORM IS macOS ({dist}, {pretty}), on the maintainer's own machine (no c
 - No Xvfb: tests use the display.
 """
 
+MSYS2 = """
+THIS PLATFORM IS MSYS2 {msystem} ON WINDOWS ({dist}, {pretty}), on the maintainer's own machine (no
+container). For sat it is a Linux-like system: sat runs with MSYS2's python, commands are bash
+(run_shell runs `bash -lc` in the {msystem} environment), build scripts are .sh, products are built
+with the environment's toolchain ({toolchain}; gcc/g++/gfortran, cmake, ninja from {prefix}/bin).
+- Native products are the environment's pacman packages: `{package_prefix}<name>` with Arch-like
+  names (no -devel: {package_prefix}boost, {package_prefix}python-numpy, {package_prefix}qt5-base),
+  declared in system_info.{k_run} / {k_dev} for {dist}. Unprefixed packages are MSYS tools (make,
+  patch, bison, flex), never libraries to link against. Check with search_packages / run_shell
+  (`pacman -Ss`, `pacman -Qi`, `pacman -Ql`, `pacman -F <file>`). Installing one modifies the
+  maintainer's machine: it needs their approval (the tool asks). Never run `pacman -Sy` alone
+  (MSYS2 only supports full upgrades).
+- It is Windows underneath (MinGW-w64, not MSVC, not Linux): _WIN32 and __MINGW32__/__MINGW64__ are
+  defined, _MSC_VER is not; shared libraries are DLLs (bin/*.dll + lib/*.dll.a import libraries), found
+  at run time through PATH (no rpath, no LD_LIBRARY_PATH), symbols need dllexport/dllimport (or
+  CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS); executables are .exe; no X11 (Qt uses its windows platform
+  plugin, OpenGL is opengl32). Code that tests `WIN32` may assume MSVC, code that tests `UNIX`/`__linux__`
+  may assume Linux: prefer the MinGW branch of upstream, a CMake option, then a minimal patch.
+- Paths: the msys tools take /c/Users/... (MSYS2 converts them for the native {msystem} programs);
+  CMake and the compilers print C:/Users/.... Never write such a local path in sat_salome.
+- Typical failures: the CMake generator (sat runs cmake; MSYS Makefiles, Unix Makefiles or Ninja), a
+  configure script needing --build/--host, Fortran/BLAS name mangling, missing Windows libraries to link
+  (ws2_32, psapi, dbghelp...), long paths, CRLF line ends in sources or patches.
+- No Xvfb: tests use the Windows desktop.
+"""
+
 LOCAL = """
 sat runs on the maintainer's own machine ({pretty}), not in a container: installing a package
 modifies it and needs their approval (the tool asks); prefer options and patches when both work.
@@ -123,6 +151,12 @@ def fmt(template: str, ctx, ref: str | None, platforms: list[str]) -> str:
         template += WINDOWS
     elif getattr(ctx.env, "system", "") == "Darwin":
         template += MACOS
+    elif getattr(ctx.env, "system", "") == "MSYS2":
+        spec = getattr(ctx.family, "spec", None) or {}
+        msys = MSYS2_ENVS.get(spec.get("msystem", ""), {})
+        template += MSYS2.replace("{msystem}", spec.get("msystem", "")).replace(
+            "{package_prefix}", spec.get("package_prefix", "")).replace(
+            "{prefix}", msys.get("prefix", "")).replace("{toolchain}", msys.get("toolchain", ""))
     elif getattr(ctx, "local", False):
         template += LOCAL
     return template.format(dist=ctx.dist, pretty=ctx.osr.pretty_name, family=ctx.family.name,

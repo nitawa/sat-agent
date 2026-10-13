@@ -334,6 +334,66 @@ python -m venv .venv && .venv\Scripts\pip install -e . distro
   Visual Studio with the C++ x64 tools, CMake. Tests: `salome.bat test` or ctest after
   `env_launch.bat` (no Xvfb).
 
+### Windows with MSYS2 (UCRT64, MINGW64)
+
+The other Windows toolchain: an [MSYS2](https://www.msys2.org) environment, **UCRT64** (gcc, UCRT,
+libstdc++) or **MINGW64** (gcc, msvcrt), with its pacman packages as native products, like a Linux
+distribution:
+
+```bat
+.venv\Scripts\sat-agent --config config.json port --msys2 C:/msys64 --batch
+```
+
+or, **from an MSYS2 UCRT64 / MINGW64 console** (the installation and the environment are the
+console's; no option needed):
+
+```bash
+winpty /c/path/to/sat-agent/.venv/Scripts/sat-agent --config config.json port
+```
+
+- sat-agent must run on a **Windows python** (python.org's, or the environment's
+  `/ucrt64/bin/python`), never on MSYS2's own `/usr/bin/python3`: that one (msys runtime) is for
+  sat only, and sat-agent stops with an explanation if it is started on it.
+- In the console window (mintty) a Windows program sees no terminal: without `winpty` (`pacman -S
+  winpty`), every question gets its `--batch` answer (missing native products built from sources,
+  nothing installed), and sat-agent warns. `msys2_shell.cmd -defterm` or Windows Terminal have a
+  real terminal.
+- From an MSYS2 console, `--msys2 off` (`execution.msys2: "off"`) ports the Visual Studio platform
+  (`W11`) instead.
+
+```bash
+# once, in an MSYS2 shell: what sat and the builds need (MINGW64: mingw-w64-x86_64-...)
+pacman -S --needed git python python-pip patch make diffutils rsync wget unzip \
+    mingw-w64-ucrt-x86_64-{gcc,gcc-fortran,cmake,ninja,pkgconf}
+/usr/bin/python3 -m pip install --user distro   # add --break-system-packages if pip refuses
+```
+
+- sat-agent stays a Windows program (its venv, git for Windows); **sat runs in MSYS2**, with
+  MSYS2's own python `/usr/bin/python3` (not `/ucrt64/bin/python`: that one is a Windows python,
+  sat would see `W11`, the MSVC platform). Every command is `<root>/usr/bin/bash.exe -lc` with
+  `MSYSTEM=UCRT64` and `CHERE_INVOKING=1`; paths are given to sat as `/c/...` and read back as `C:/...`.
+- **Platform**: sat does not know MSYS2. sat-agent teaches it on the branch `sat-agent/distro-msys2`
+  of sat: the name the `distro` module reports there (uname, `MINGW64_NT-10.0-<build>` → key
+  `mingw64_nt`), the code `MSYS` and, as version, the environment (`MSYSTEM`): platform
+  **`MSYS_UCRT64`**. sat checks the packages with `pacman -T` and reads `system_info.msys2` /
+  `msys2_dev`.
+- **Native products** are the environment's packages, `mingw-w64-ucrt-x86_64-<name>` with Arch-like
+  names, translated from the reference platform's (Fedora) names; unprefixed MSYS packages are only
+  accepted for tools (bison, make), never for libraries. Missing ones are asked per product
+  (install with pacman / build from sources / keep missing) as on macOS. sat-agent never runs
+  `pacman -Sy` (MSYS2 only supports full upgrades: `pacman -Syu` is yours).
+- Build scripts are bash (`.sh`); tests use the Windows desktop (no Xvfb).
+- **The environment is the console's**, unless `--msystem` / `execution.msystem` names it:
+  1. `MSYSTEM` of the console sat-agent is started from (the `ucrt64.exe` / `mingw64.exe` launchers,
+     `msys2_shell.cmd -ucrt64`, a Windows Terminal profile all set it);
+  2. else `MSYSTEM` in `<root>/msys2.ini`, the default console's configuration, when it names a build
+     environment (the `MSYS` environment is not one);
+  3. else the environment whose toolchain is installed (`<root>/<env>/bin/gcc.exe`), UCRT64 first.
+  The log says which one and why. Each environment is its own platform (`MSYS_UCRT64`,
+  `MSYS_MINGW64`) of the same sat support (`sat-agent/distro-msys2`).
+- Supported: UCRT64, MINGW64 (`platform.MSYS2_ENVS`: package prefix, directory, toolchain; CLANG64
+  would only need its entry there).
+
 ---
 
 ## Install & configure

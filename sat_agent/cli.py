@@ -12,6 +12,8 @@
     sat-agent bench ~/bench/*                # compare the token usage of those runs
     sat-agent port --local --app SALOME-master-windows   # Windows: port this machine, without docker
     sat-agent port --local                   # macOS / Linux: port this machine (brew / apt, dnf... with sudo)
+    sat-agent port --msys2 C:/msys64         # Windows: port its MSYS2 environment (UCRT64 / MINGW64: the console's)
+    sat-agent port                           # (in an MSYS2 UCRT64 / MINGW64 console: the same, found from it)
 """
 
 import argparse
@@ -37,6 +39,10 @@ def get_config(args) -> dict:
         cfg["llm"]["model"] = args.model
     if getattr(args, "llm_base_url", None):
         cfg["llm"]["base_url"] = args.llm_base_url
+    if getattr(args, "msys2", None):
+        cfg["execution"]["msys2"] = args.msys2
+    if getattr(args, "msystem", None):
+        cfg["execution"]["msystem"] = args.msystem
     return cfg
 
 
@@ -252,8 +258,19 @@ def cmd_port(args) -> int:
     from sat_agent.tools.web import Web
     from sat_agent.docker_env import docker_available
 
+    from sat_agent.local_env import msys2_console, no_terminal_hint, under_msys_runtime
+
     cfg = get_config(args)
-    local = getattr(args, "local", False) or (cfg.get("execution") or {}).get("backend") == "local"
+    if under_msys_runtime():
+        log.error("sat-agent runs on MSYS2's own python (msys runtime), which is only for sat: start it with a "
+                  "Windows python, e.g. its venv: .venv/Scripts/sat-agent port --local")
+        return 2
+    msys2 = str((cfg.get("execution") or {}).get("msys2") or "")
+    in_console = os.name == "nt" and msys2.lower() not in ("off", "no") and bool(msys2_console())
+    local = getattr(args, "local", False) or (cfg.get("execution") or {}).get("backend") == "local" \
+        or (bool(msys2) and msys2.lower() not in ("off", "no")) or in_console
+    if (in_console or msys2) and local and not args.batch and not sys.stdin.isatty():
+        log.warning("%s", no_terminal_hint())
     if local:
         if args.image and args.image != "local":
             log.error("--local ports this machine itself: no IMAGE (%s)", args.image)
@@ -261,7 +278,7 @@ def cmd_port(args) -> int:
         args.image = "local"
     elif os.name == "nt" or sys.platform == "darwin":
         log.error("on Windows and macOS, sat-agent ports this machine itself without docker: use "
-                  "`sat-agent port --local`")
+                  "`sat-agent port --local` (Windows, MSYS2: `sat-agent port --msys2 <root>`)")
         return 2
     start_trace(args, cfg)
     llm = LLMClient(cfg["llm"]) if cfg["llm"].get("base_url") and cfg["llm"].get("model") else None
@@ -395,6 +412,15 @@ def main(argv=None) -> int:
                     help="port this machine itself, without docker: sat runs here. Windows: cmd / PowerShell / "
                          "Python, Visual Studio, no system packages; macOS: Homebrew; Linux: its package manager "
                          "(sudo). Nothing is installed without your approval")
+    pp.add_argument("--msys2", nargs="?", const="auto", metavar="ROOT",
+                    help="Windows: port the MSYS2 environment of this machine (implies --local): sat runs with "
+                         "MSYS2's python in bash, native products are the environment's pacman packages. ROOT: "
+                         "the MSYS2 installation (default: the console's, else C:/msys64); `off`: the Visual "
+                         "Studio platform even from an MSYS2 console. Started from an MSYS2 UCRT64/MINGW64 "
+                         "console, sat-agent ports it without this option")
+    pp.add_argument("--msystem", choices=["UCRT64", "MINGW64"], type=str.upper,
+                    help="MSYS2 environment to port (execution.msystem; default: the console's: MSYSTEM of the "
+                         "console sat-agent runs in, else msys2.ini, else the installed toolchain, UCRT64 first)")
     pp.add_argument("--model", help="LLM model (overrides llm.model of the config file)")
     pp.add_argument("--llm-base-url", metavar="URL",
                     help="OpenAI-compatible endpoint (overrides llm.base_url of the config file)")

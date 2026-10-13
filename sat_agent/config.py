@@ -44,7 +44,12 @@ DEFAULT_CONFIG: dict = {
         "backend": "docker",
         "shell": "cmd",              # local Windows: default interpreter of commands (cmd | powershell | python)
         "vcvars": "auto",            # local Windows: vcvars64.bat to load ("auto" = vswhere, "" = none)
-        "python": "",                # local: python running sat (default: the one running sat-agent)
+        "python": "",                # local: python running sat (default: the one running sat-agent;
+                                     # MSYS2: /usr/bin/python3, the msys one)
+        "msys2": "",                 # local Windows: MSYS2 root (e.g. C:/msys64) = port its environment;
+                                     # "" = the console's if started from one, "off" = never
+        "msystem": "",               # MSYS2 environment: UCRT64 | MINGW64 (platform MSYS_<env>);
+                                     # "" = the console's (MSYSTEM, msys2.ini, installed toolchain)
     },
     "web_search": {
         "backend": "duckduckgo",     # duckduckgo | searxng | tavily | none

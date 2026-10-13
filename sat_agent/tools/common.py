@@ -159,9 +159,13 @@ def make_common_tools(ctx) -> list[Tool]:
              obj({"command": S, "shell": {"type": "string", "enum": ["cmd", "powershell", "python"]},
                   "timeout": I}, ["command"]), run_shell)
         if windows else
-        Tool("run_shell", "Run a diagnostic shell command inside the target platform container (cwd = "
-             "application workdir), e.g. pkg-config --modversion, gcc --version, ls /usr/include/..., "
-             "python3 -c 'import x'. Do NOT use it to edit files.",
+        Tool("run_shell", (f"Run a diagnostic bash command in the MSYS2 {ctx.env.msystem} environment of this Windows "
+                           "machine (cwd = application workdir), e.g. pkg-config --modversion, gcc --version, "
+                           "pacman -Ql <package>, ls $MINGW_PREFIX/include/..., cygpath -w <path>"
+                           if getattr(ctx.env, "msys2", "") else
+                           "Run a diagnostic shell command inside the target platform container (cwd = "
+                           "application workdir), e.g. pkg-config --modversion, gcc --version, ls /usr/include/..., "
+                           "python3 -c 'import x'") + ". Do NOT use it to edit files.",
              obj({"command": S, "timeout": I}, ["command"]), run_shell))
     package_tools = [
         Tool("search_packages", "Search the target's package repositories by package-name pattern.",

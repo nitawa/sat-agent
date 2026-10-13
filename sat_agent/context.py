@@ -17,6 +17,7 @@ no Dockerfile nor system package.
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shlex
@@ -459,13 +460,32 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
     * Windows: platform W<release> (sat knows it), no system package, cmd/PowerShell/Python;
     * macOS: sat does not know it: a DistroPlan (name Darwin, new code, macOS major version,
       Homebrew) is written on sat's branch sat-agent/distro-macos; native products are brew formulae;
-    * Linux: the distribution of /etc/os-release, as sat detects it; its package manager, with sudo.
+    * Linux: the distribution of /etc/os-release, as sat detects it; its package manager, with sudo;
+    * MSYS2 (Windows, execution.msys2 = its root): sat runs with MSYS2's python in an environment
+      (UCRT64, MINGW64: the console's, local_env.detect_msystem), which sat does not know: a DistroPlan (uname name, code MSYS, version = MSYSTEM ->
+      MSYS_UCRT64, pacman) is written on sat's branch sat-agent/distro-msys2; commands are bash.
     Nothing is installed on the machine without the maintainer's approval (install_packages)."""
     from sat_agent.local_env import (LocalEnv, detect_windows_dist, host_system, linux_os_release, macos_os_release,
-                                     macos_version, windows_os_release)
+                                     detect_msystem, macos_version, msys2_console, msys2_probe,
+                                     under_msys_runtime, windows_os_release)
 
-    system = system or host_system()
-    if system not in ("Windows", "Darwin", "Linux"):
+    ex = cfg.get("execution") or {}
+    if system is None and under_msys_runtime():
+        raise RuntimeError("sat-agent runs on MSYS2's own python (msys runtime): that python is only for sat. "
+                           "Start sat-agent with a Windows python (python.org, or the environment's "
+                           "/ucrt64/bin/python), e.g. its venv: .venv/Scripts/sat-agent port --local")
+    # MSYS2: given (execution.msys2 / --msys2 [root]), or the console sat-agent runs in; "off" = the
+    # Visual Studio platform even from an MSYS2 console
+    root = str(ex.get("msys2") or "")
+    console = msys2_console() if root.lower() not in ("off", "no") and host_system() == "Windows" else ""
+    if root.lower() in ("off", "no"):
+        root = ""
+    elif root == "auto" or (not root and console):
+        root = console or r"C:\msys64"
+        if console:
+            log.info("MSYS2 console (MSYSTEM=%s): porting its installation %s", os.environ.get("MSYSTEM"), root)
+    system = system or ("MSYS2" if root else host_system())
+    if system not in ("Windows", "Darwin", "Linux", "MSYS2"):
         raise RuntimeError(f"--local: unsupported operating system {system!r}")
     paths = cfg["paths"]
     work_root = Path(paths["work_root"])
@@ -473,10 +493,17 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
     for p in (sat_up / "sat", sal_up / "salome.pyconf"):
         if not p.exists():
             raise FileNotFoundError(f"{p} not found: check paths.sat / paths.sat_salome")
-    ex = cfg.get("execution") or {}
     vcvars = ex.get("vcvars", "auto")
+    msystem = (ex.get("msystem") or "").upper()
+    if system == "MSYS2":
+        if msystem:
+            log.info("MSYS2 environment %s (execution.msystem / --msystem)", msystem)
+        else:
+            msystem, why = detect_msystem(root or r"C:\msys64")
+            log.info("MSYS2 environment %s: %s", msystem, why)
     probe = LocalEnv(str(work_root), str(work_root / "home"), system=system, shell=ex.get("shell", "cmd"),
-                     vcvars=None if vcvars == "auto" else vcvars, python=ex.get("python") or "")
+                     vcvars=None if vcvars == "auto" else vcvars, python=ex.get("python") or "",
+                     msys2_root=root, msystem=msystem or "UCRT64")
     plan, known, distro_name = None, True, system
     if system == "Windows":
         osr, family = windows_os_release(), NO_PACKAGES
@@ -495,6 +522,13 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
         family, dist, known = plan.family_obj(), plan.dist(macos_version()), False
         if not shutil.which("brew"):
             log.warning("Homebrew (brew) not found on PATH: native products cannot be checked nor installed")
+    elif system == "MSYS2":
+        seen = msys2_probe(probe)
+        distro_name = seen["NAME"]
+        plan = distro_support.msys2_plan(sat_capabilities.known_distributions(sat_up), distro_name, probe.msystem)
+        osr = OSRelease(id="msys2", id_like=[], version_id=probe.msystem, name=distro_name,
+                        pretty_name=f"MSYS2 {probe.msystem} (Windows {platform.release()}, {distro_name})")
+        family, dist, known = plan.family_obj(), plan.dist(probe.msystem), False
     else:
         osr = linux_os_release()
         if osr.name and not distro_support.sat_knows(sat_capabilities.known_distributions(sat_up), osr.name):
@@ -516,13 +550,15 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
     if plan is not None:
         sat_capabilities.ensure_distribution_support(sat_up, sat_dir, plan, sat_base, port_dir,
                                                      prefix=cfg["git"].get("branch_prefix", "sat-agent/"))
+        # MSYS2: the branch is shared by the environments, whose uname may differ
+        sat_capabilities.ensure_distribution(sat_dir, plan.sat_name, plan.code)
     elif not known:
         sat_capabilities.ensure_distribution(sat_dir, distro_name.lower(), re.match(r"[A-Z]+", dist).group(0))
     sat_capabilities.ensure_system_info_exclusions(sat_dir)
-    if system == "Darwin":
-        cfg["tests"]["use_xvfb"] = False                     # no Xvfb on macOS: tests use the display
+    if system in ("Darwin", "MSYS2"):
+        cfg["tests"]["use_xvfb"] = False                     # no Xvfb on macOS / Windows: tests use the display
     env = LocalEnv(workdir=str(port_dir), home=str(port_dir / "home"), system=system, shell=probe.shell,
-                   vcvars=probe.vcvars, python=probe.python)
+                   vcvars=probe.vcvars, python=probe.python, msys2_root=probe.msys2, msystem=probe.msystem or "UCRT64")
     env.start()
     sat = SatRunner(env, str(sat_dir), cfg["application"], cfg.get("sat_overrides", []),
                     port_dir / "logs", make_jobs=(cfg.get("docker") or {}).get("make_jobs", 0))
@@ -534,6 +570,13 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
         ctx.notes.append("no Visual Studio environment loaded (vcvars64.bat not found and sat-agent not started "
                          "from a Visual Studio prompt): set execution.vcvars")
         log.warning(ctx.notes[-1])
+    if system == "MSYS2":
+        out = env.exec(family.installed_cmd(list(family.bootstrap)), timeout=600).output
+        lacking = [m.group(1) for m in re.finditer(r"^(\S+) KO$", out, re.M)]
+        if lacking:
+            ctx.notes.append(f"MSYS2 {env.msystem}: not installed: {' '.join(lacking)} (pacman -S --needed "
+                             f"{' '.join(lacking)})")
+            log.warning(ctx.notes[-1])
     for repo in (sat_up, sal_up):
         msg = _warn_crlf(repo)
         if msg:
@@ -541,6 +584,6 @@ def open_local_port(cfg: dict, llm=None, web=None, on_existing_branch=None, syst
     _sat_init(ctx, branch)
     wd = sat.app_var("APPLICATION.workdir")
     if wd:
-        ctx.workdir = Path(wd)
+        ctx.workdir = Path(env.host_path(wd))
         log.info("application directory (sat): %s", ctx.workdir)
     return ctx

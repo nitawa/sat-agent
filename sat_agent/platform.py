@@ -337,6 +337,54 @@ SPECS = {
     },
 }
 
+# MSYS2 (local mode only, on Windows; https://www.msys2.org/docs/environments/, package-naming/):
+# pacman serves every environment from one database. The packages of an environment carry its
+# prefix (UCRT64: mingw-w64-ucrt-x86_64-boost); the unprefixed ones are MSYS packages (tools
+# running on the msys runtime: bash, make, patch, bison...), never libraries for the build. Runs
+# as the user (no sudo on Windows). MSYS2 only supports full upgrades (`pacman -Syu`, docs/updating/):
+# sat-agent never refreshes the databases itself. The environment is that of the MSYS2 console
+# (local_env.detect_msystem), in this order of preference when nothing tells.
+MSYS2_ENVS = {
+    "UCRT64": {"prefix": "/ucrt64", "package_prefix": "mingw-w64-ucrt-x86_64-",
+               "toolchain": "gcc, ucrt (Universal C Runtime), libstdc++"},
+    "MINGW64": {"prefix": "/mingw64", "package_prefix": "mingw-w64-x86_64-",
+                "toolchain": "gcc, msvcrt (the old Microsoft C runtime), libstdc++"},
+}
+
+
+def msys2_spec(msystem: str = "UCRT64") -> dict:
+    """The pacman of an MSYS2 environment as a SpecFamily description (key `msys2`: sat checks with
+    `pacman -T`, which follows provides like on Arch)."""
+    env = MSYS2_ENVS.get(msystem.upper())
+    if env is None:
+        raise ValueError(f"MSYS2 environment {msystem!r} not supported (supported: {', '.join(MSYS2_ENVS)})")
+    pp = env["package_prefix"]
+    # environment packages and MSYS tools, not the other environments' packages (one database for all)
+    keep = f"sed 's#^[^/ ]*/##' | awk '!/^mingw-w64-/ || index($0, \"{pp}\") == 1'"
+    return {
+        "name": "msys2", "binary": "pacman", "msystem": msystem.upper(), "package_prefix": pp,
+        "refresh": "pacman -Syu --noconfirm",
+        "install": "pacman -S --noconfirm --needed {pkgs}",
+        "available": "pacman -Sp -dd --noconfirm --print-format %n {pkg} >/dev/null 2>&1",   # follows provides
+        "installed": "pacman -T {pkg} >/dev/null 2>&1",                                       # sat's check
+        "search": "pacman -Ssq {term} 2>/dev/null | " + keep,
+        "search_regex": r"^(?:[^/\s]+/)?(?P<name>[A-Za-z0-9][\w@.+-]*)$",
+        "provider": "pacman -Sp -dd --noconfirm --print-format %n {pkg} 2>/dev/null",
+        # pacman -F matches a file name (with a "/", the whole path from the root: ucrt64/include/...)
+        "file_owner": '{{ pacman -Fy >/dev/null 2>&1; pacman -Fq "$(basename {path})" 2>/dev/null; }} | ' + keep,
+        "cleanup": "",
+        "sat_check": ["missing", "pacman", "-T"],
+        "probe_installed": "msys2-runtime", "probe_available": pp + "zlib",
+        # what sat and the builds need (MSYS tools + the environment's toolchain)
+        "bootstrap": ["git", "python", "python-pip", "patch", "make", "diffutils", "rsync", "wget", "unzip",
+                      pp + "gcc", pp + "cmake", pp + "ninja", pp + "pkgconf", pp + "gcc-fortran"],
+        "naming_hint": f"MSYS2 {msystem.upper()} on Windows (pacman): libraries, headers and build tools of the "
+                       f"environment are `{pp}<name>` with Arch-like names (development files in the main package, "
+                       f"no -devel: boost-devel -> {pp}boost; python3-X -> {pp}python-X; qt5-qtbase-devel -> "
+                       f"{pp}qt5-base). Unprefixed names are MSYS tools (make, patch, bison, flex), never "
+                       "libraries. No X11/GL system packages (Windows has its own OpenGL).",
+    }
+
 
 def known_families() -> list[PkgFamily]:
     """Every family sat-agent can drive, in probing order (dpkg before rpm: an rpm binary can be
@@ -349,6 +397,8 @@ def family_named(name: str, spec: dict | None = None) -> PkgFamily:
         return family_from_spec(spec)
     if name == NO_PACKAGES.name:
         return NO_PACKAGES
+    if name == "msys2":
+        return family_from_spec(msys2_spec())
     for fam in known_families():
         if fam.name == name:
             return fam

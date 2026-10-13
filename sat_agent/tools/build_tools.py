@@ -45,9 +45,11 @@ def host_paths(ctx) -> list[str]:
 
 
 def refuse_host_path(ctx, text: str) -> str | None:
+    posix = getattr(ctx.env, "posix_path", str)
     for r in host_paths(ctx):
-        # Windows paths are also written with "/" (C:/Users/...), and case does not matter there
-        if any(v in (text or "") for v in {r, r.replace("\\", "/")}) or \
+        # Windows paths are also written with "/" (C:/Users/...), and case does not matter there;
+        # MSYS2 writes them /c/Users/...
+        if any(v in (text or "") for v in {r, r.replace("\\", "/"), posix(r)}) or \
                 ("\\" in r and r.replace("\\", "/").lower() in (text or "").replace("\\", "/").lower()):
             return (f"refused: the value contains the local path {r}; sat_salome must stay portable. Use "
                     "sat variables ($APPLICATION.workdir, $SOURCE_DIR, $PRODUCT_INSTALL...) or, for a build "

@@ -22,7 +22,10 @@ class SatRunner:
     def __init__(self, env: DockerEnv, sat_dir: str, app: str, overrides: list[str], logs_dir: Path,
                  make_jobs: int = 0):
         self.env = env
-        self.sat = str(Path(sat_dir) / "sat")
+        # paths as sat takes them (MSYS2: /c/... for the msys python) and as sat-agent reads them back
+        self.to_sat = getattr(env, "posix_path", str)
+        self.from_sat = getattr(env, "host_path", str)
+        self.sat = self.to_sat(str(Path(sat_dir) / "sat"))
         self.app = app
         self.overrides = overrides
         self.logs_dir = Path(logs_dir)
@@ -49,11 +52,12 @@ class SatRunner:
 
     # ------------------------------------------------------------------ setup
     def init(self, workdir: str, log_dir: str, project_pyconf: str) -> ExecResult:
-        r = self.run(f"init -w {self.q(workdir)} -l {self.q(log_dir)}", "init", app_command=False)
+        r = self.run(f"init -w {self.q(self.to_sat(workdir))} -l {self.q(self.to_sat(log_dir))}", "init",
+                     app_command=False)
         if not r.ok:
             return r
         self.run("init --reset_projects", "init", app_command=False)
-        return self.run(f"init --add_project {self.q(project_pyconf)}", "init", app_command=False)
+        return self.run(f"init --add_project {self.q(self.to_sat(project_pyconf))}", "init", app_command=False)
 
     def var(self, name: str) -> str | None:
         r = self.run(f"config -v VARS.{name}", "vars", app_command=False, timeout=300)
@@ -115,7 +119,7 @@ class SatRunner:
                          ("build_dir", r"^\s*build dir = '([^']+)'"),
                          ("install_dir", r"^\s*install dir = '([^']+)'")):
             m = re.search(pat, text, re.MULTILINE)
-            info[key] = m.group(1) if m else None
+            info[key] = (self.from_sat(m.group(1)) if key.endswith("_dir") else m.group(1)) if m else None
         info["patches"] = re.findall(r"^\s*patch = (\S+)", text, re.MULTILINE)
         info["exists"] = r.ok and "is a product" in text
         return info

@@ -189,6 +189,8 @@ def render_report(ctx, state, verify: str, violations: list[str], commit_error: 
               " in sat and sat_salome, then merge them.",
               (f"2. Reproduce on a {ctx.osr.pretty_name} machine: `sat prepare` / `sat compile {ctx.app}`"
                + (" from a Visual Studio x64 prompt." if ctx.windows else
+                  f" from an MSYS2 {ctx.env.msystem} shell (with MSYS2's /usr/bin/python3), after installing the "
+                  f"pacman packages declared for {ctx.dist}." if getattr(ctx.env, "msys2", "") else
                   f", after installing the {ctx.family.name} packages declared for {ctx.dist}.")
                if getattr(ctx, "local", False) else
                f"2. Reproduce: `docker build -t salome-{ctx.dist.lower()} -f dockers/{ctx.dockerfile_name} .` and "

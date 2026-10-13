@@ -33,7 +33,7 @@ from sat_agent.logs import log
 from sat_agent.platform import SAT_DIST_CODES, SPECS, OSRelease, PkgFamily, SpecFamily, family_from_spec, \
     family_named, known_families
 
-VERSION_RULES = ("none", "major", "major.minor", "macos")
+VERSION_RULES = ("none", "major", "major.minor", "macos", "msystem")
 NO_SUCH = "sat-agent-no-such-package"
 # package managers sat-agent has no entry for, named to the LLM when one of them is in the image
 _OTHER_MANAGERS = ("emerge", "eopkg", "swupd", "urpmi", "tdnf", "yum", "nix-env", "opkg", "slackpkg", "pkg",
@@ -61,6 +61,9 @@ class DistroPlan:
 
     def dist(self, version: str) -> str:
         """The platform code sat will compute (the patched get_distrib_version)."""
+        if self.version_rule == "msystem":
+            # MSYS2: one code for the installation, the environment tells the platforms apart
+            return f"{self.code}_{version.upper()}" if version else self.code
         parts = (version or "").split(".")
         if self.version_rule == "none" or not parts[0]:
             return self.code
@@ -72,6 +75,7 @@ class DistroPlan:
         what = f"derivative of {self.derivative_of}, keeps its code" if self.derivative_of else "new code"
         rule = {"none": "rolling release, no version", "major": "major version",
                 "major.minor": "major.minor version", "macos": "macOS major version (platform.mac_ver)",
+                "msystem": "MSYS2 environment (MSYSTEM: MSYS_UCRT64)",
                 "": "version rule of the parent"}[self.version_rule]
         return (f"{self.pretty or self.id}: sat name {self.sat_name!r} -> {self.code} ({what}); {rule}; "
                 f"package manager {self.family}" + (f"\n{self.evidence}" if self.evidence else ""))
@@ -346,3 +350,27 @@ def macos_plan(table: dict[str, str], sat_name: str, version: str) -> DistroPlan
     return DistroPlan(id="macos", pretty=f"macOS {version}", sat_name=(sat_name or "Darwin").lower(),
                       code=known or make_code(osr, set(table.values())), family="brew", version_rule="macos",
                       spec=SPECS["brew"], evidence="local macOS machine (platform.mac_ver), Homebrew")
+
+
+def msys2_sat_name(name: str) -> str:
+    """The key sat matches in the name the distro module reports under MSYS2: its uname, e.g.
+    "MINGW64_NT-10.0-26100" -> "mingw64_nt" (without the Windows build: not machine-specific)."""
+    m = re.match(r"([a-z0-9]+_nt)\b", (name or "").lower())
+    return m.group(1) if m else (name or "msys2").lower()
+
+
+def msys2_plan(table: dict[str, str], sat_name: str, msystem: str) -> DistroPlan:
+    """MSYS2 for sat: sat runs with MSYS2's own python (/usr/bin/python3, the msys runtime: it is
+    not Windows for sat, so the Linux-like build applies: bash, .sh scripts, system_info), the name
+    the distro module reports there, the code MSYS, the environment as version (MSYS_UCRT64) and
+    the environment's pacman. One plan (and one sat branch, sat-agent/distro-msys2) for every
+    environment: only the package names differ."""
+    from sat_agent.platform import msys2_spec
+
+    spec = msys2_spec(msystem)
+    key = msys2_sat_name(sat_name)
+    code = next((c for k, c in table.items() if k in key), None) or "MSYS"
+    return DistroPlan(id="msys2", pretty=f"MSYS2 {spec['msystem']}", sat_name=key, code=code, family="msys2",
+                      version_rule="msystem", spec=spec,
+                      evidence=f"local MSYS2 installation, environment {spec['msystem']} (MSYSTEM), sat sees "
+                               f"{sat_name!r}; pacman, packages {spec['package_prefix']}*")

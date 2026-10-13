@@ -367,13 +367,14 @@ def _source_family(ctx, ref_dockerfile: Path) -> str | None:
 
 
 # naming conventions of the target families: development package suffix, python prefix
-_NAMING = {"brew": ("", ""), "pacman": ("", "python-"), "apk": ("-dev", "py3-"), "xbps": ("-devel", "python3-"),
+_NAMING = {"brew": ("", ""), "pacman": ("", "python-"), "msys2": ("", "python-"), "apk": ("-dev", "py3-"), "xbps": ("-devel", "python3-"),
            "dnf": ("-devel", "python3-"), "zypper": ("-devel", "python3-"), "apt": ("-dev", "python3-")}
 
 
-def heuristic_names(name: str, src: str, target: str) -> list[str]:
+def heuristic_names(name: str, src: str, target: str, prefix: str = "") -> list[str]:
     """Likely names, in the target family, of the package `name` of the source family (rpm|apt),
-    most likely first. Every guess is checked against the target's repositories."""
+    most likely first. Every guess is checked against the target's repositories. prefix: package
+    prefix of the target environment (MSYS2 UCRT64: mingw-w64-ucrt-x86_64-), Arch-like names after it."""
     if target not in _NAMING or target == {"rpm": "dnf", "apt": "apt"}.get(src):
         return [name]
     dev_suffix, py = _NAMING[target]
@@ -382,14 +383,14 @@ def heuristic_names(name: str, src: str, target: str) -> list[str]:
     if src == "rpm":
         dev = bool(re.search(r"-(devel|static|headers)$", n))
         base = re.sub(r"-(devel|libs|static|headers)$", "", n)
-        if target == "pacman":
+        if target in ("pacman", "msys2"):
             base = re.sub(r"^(qt[56])-qt", r"\1-", base)                    # qt5-qtbase -> qt5-base
         if target == "brew":
             base = re.sub(r"^qt([56])-qt\w+$", r"qt@\1", base)            # qt5-qtbase -> qt@5
     else:
         dev = n.endswith("-dev")
         base = re.sub(r"t64$", "", re.sub(r"-(dev|bin|common|data|tools|runtime)$", "", n))
-        if target == "pacman":
+        if target in ("pacman", "msys2"):
             base = re.sub(r"^qt(base|tools|svg|declarative|x11extras)([56])$", r"qt\2-\1", base)
     if base.startswith("python3-"):
         base = py + base[len("python3-"):]
@@ -401,6 +402,11 @@ def heuristic_names(name: str, src: str, target: str) -> list[str]:
         if dev and dev_suffix:
             out.append(v + dev_suffix)
         out.append(v)
+    if prefix:
+        # the environment's packages first; unprefixed names are MSYS tools (bison, make), never a
+        # library or a python module (msys2 has libxml2-devel, for the msys runtime only)
+        tool = not dev and not re.match(r"^(lib|python|py3?-|perl-)", n) and not n.endswith(("-libs", "-dev"))
+        out = [prefix + x for x in out[1:] + out[:1]] + ([x for x in out if x == base] if tool else [])
     return [x for x in dict.fromkeys(out) if x]
 
 
@@ -515,7 +521,8 @@ def translate_names(ctx, names: list[str], src: str, web: bool = False) -> dict[
     todo = [n for n in dict.fromkeys(names) if n and n not in cache]
     if todo:
         log.info("translating %d %s package name(s) to %s names", len(todo), src, ctx.family.name)
-        guesses = {n: heuristic_names(n, src, ctx.family.name) for n in todo}
+        prefix = (getattr(ctx.family, "spec", None) or {}).get("package_prefix", "")
+        guesses = {n: heuristic_names(n, src, ctx.family.name, prefix) for n in todo}
         ok = ctx.installable([g for gs in guesses.values() for g in gs])
         for n in todo:
             cache[n] = next((g for g in guesses[n] if ok.get(g)), None)
