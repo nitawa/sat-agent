@@ -28,7 +28,7 @@ _PROGRAM = re.compile(r"(?:^|\s)([\w.+-]+): (?:command )?not found$", re.M)
 # CMake/configure messages, which are often about optional dependencies ("Could NOT find X" while
 # configuring is frequently harmless); never a configure check like "-- Looking for strerror - found"
 _ERROR_TIERS = [
-    re.compile(r"(?<![\w-])(?:fatal )?error:|undefined reference to|cannot find -l|No module named"
+    re.compile(r"(?<![\w-])(?:fatal )?error(?:\s+(?:C|LNK)\d+)?:|undefined reference to|cannot find -l|No module named"
                r"|: command not found|Traceback \(most recent call last\)", re.I),
     re.compile(r"^CMake Error|^configure: error", re.I),
     re.compile(r"Could NOT find|No package '.*' found|Could not find a package configuration file"),
@@ -39,8 +39,9 @@ def error_query(line: str, product: str | None = None) -> str:
     """A web query from an error line: no paths, positions, quotes or {aka ...}."""
     q = strip_ansi(line).strip()
     q = re.sub(r"\{aka[^}]*\}", " ", q)
-    q = re.sub(r"(?:[\w.+-]*/)+([\w.+-]+?)(?::\d+)*:", r" \1 ", q)   # /path/to/openssl.c:477:11: -> openssl.c
-    q = re.sub(r"(?:[\w.+-]*/)+([\w.+-]+)", r" \1 ", q)
+    q = re.sub(r"(?:[A-Za-z]:[/\\])?(?:[\w.+-]*[/\\])+([\w.+-]+?)(?:\(\d+(?:,\d+)?\)|(?::\d+)+)\s*:", r" \1 ", q)
+    q = re.sub(r"(?:[A-Za-z]:[/\\])?(?:[\w.+-]*[/\\])+([\w.+-]+)", r" \1 ", q)
+    q = re.sub(r"\(\d+(?:,\d+)?\)\s*:", ":", q)
     q = re.sub(r"\b\d+:\d+\b", " ", q)
     q = re.sub(r"[‘’“”\"'`«»]", " ", q)
     q = re.sub(r"(?<![\w-])(?:fatal )?error:\s*", " ", q.strip(), flags=re.I)

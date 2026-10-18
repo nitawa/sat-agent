@@ -128,3 +128,26 @@ def test_platform_section_name_and_placement_handle_rolling_and_msys2():
     assert place == {"after": "default_AR"}
 
 
+# --------------------------------------------------------------------------- Issue 5
+def test_parsers_and_diagnose_support_msvc_and_relative_paths():
+    log_text = "\n".join([
+        "Build started...",
+        "src/med/med_io.cxx:42:10: fatal error: hdf5.h: No such file or directory",
+        r"C:\work\SOURCES\GUI\src\main.cxx(108,5): fatal error C1083: Cannot open include file: 'boost/shared_ptr.hpp': No such file or directory",
+        r"C:\work\SOURCES\GUI\src\view.cxx(55): error C2065: 'glBegin': undeclared identifier",
+        "LINK : fatal error LNK1104: cannot open file 'vtkCommonCore.lib'",
+    ])
+    errs = first_errors(log_text)
+    assert len(errs) == 4
+    mf = missing_files(log_text)
+    assert mf["headers"] == ["boost/shared_ptr.hpp", "hdf5.h"]
+    assert mf["libs"] == ["vtkCommonCore"]
+
+    line = diagnose.first_error_line(r"C:\work\SOURCES\GUI\src\view.cxx(55): error C2065: 'glBegin': undeclared identifier")
+    assert line is not None
+    q = diagnose.error_query(line, product="GUI")
+    assert "C:\\work" not in q
+    assert "view.cxx" in q
+    assert "C2065" in q
+
+

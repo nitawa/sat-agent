@@ -158,15 +158,23 @@ def parse_compile(text: str) -> CompileResult:
 
 # ----------------------------------------------------------------- compiler errors
 _ERR_RES = [
-    re.compile(r"^(?P<file>/\S+?):(?P<line>\d+)(?::\d+)?:\s+(?:fatal )?error:\s*(?P<msg>.*)$"),
+    re.compile(r"^(?P<file>(?:/|[A-Za-z]:[/\\]|[\w./\\+-]+/)\S+?):(?P<line>\d+)(?::\d+)?:\s+(?:fatal )?error:\s*(?P<msg>.*)$"),
+    re.compile(r"^(?P<file>\S+?\.(?:c|cc|cpp|cxx|h|hh|hpp|hxx|f|f90|F|F90|rs|py)):(?P<line>\d+)(?::\d+)?:\s+(?:fatal )?error:\s*(?P<msg>.*)$"),
+    re.compile(r"^(?P<file>.+?)\((?P<line>\d+)(?:,\d+)?\)\s*:\s*(?:fatal )?error\s+(?P<code>C\d+):\s*(?P<msg>.*)$"),
+    re.compile(r"^(?P<file>.+?)\s*:\s*(?:fatal )?error\s+(?P<code>LNK\d+):\s*(?P<msg>.*)$"),
     re.compile(r"^CMake Error(?: at (?P<file>\S+):(?P<line>\d+))?.*$"),
     re.compile(r"^(?P<msg>.*\bundefined reference to\b.*)$"),
     re.compile(r"^(?P<msg>.*No module named .*)$"),
     re.compile(r"^(?P<msg>(?:Error|ERROR|error):.*)$"),
     re.compile(r"^(?P<msg>.*Could NOT find .*)$"),
 ]
-_MISSING_HEADER_RE = re.compile(r"fatal error:\s*([\w./+-]+\.(?:h|hh|hpp|hxx|H)):\s*No such file")
-_MISSING_LIB_RE = re.compile(r"cannot find -l([\w+.-]+)")
+_MISSING_HEADER_RE = re.compile(
+    r"(?:fatal error:\s*([\w./\\+-]+\.(?:h|hh|hpp|hxx|H)):\s*No such file"
+    r"|fatal error C1083:\s*Cannot open include file:\s*['\"]([\w./\\+-]+\.(?:h|hh|hpp|hxx|H))['\"])"
+)
+_MISSING_LIB_RE = re.compile(
+    r"(?:cannot find -l([\w+.-]+)|fatal error LNK1104:\s*cannot open file\s*['\"]([\w+.-]+?)(?:\.lib)?['\"])"
+)
 
 
 def first_errors(text: str, limit: int = 15) -> list[str]:
@@ -187,8 +195,9 @@ def first_errors(text: str, limit: int = 15) -> list[str]:
 
 def missing_files(text: str) -> dict[str, list[str]]:
     t = strip_ansi(text)
-    return {"headers": sorted(set(_MISSING_HEADER_RE.findall(t))),
-            "libs": sorted(set(_MISSING_LIB_RE.findall(t)))}
+    headers = {g.replace("\\", "/") for m in _MISSING_HEADER_RE.finditer(t) for g in m.groups() if g}
+    libs = {g for m in _MISSING_LIB_RE.finditer(t) for g in m.groups() if g}
+    return {"headers": sorted(headers), "libs": sorted(libs)}
 
 
 # ----------------------------------------------------------------- ctest
