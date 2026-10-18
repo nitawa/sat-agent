@@ -364,5 +364,7 @@ class FixSession:
                  obj({"status": {"type": "string", "enum": statuses}, "summary": S,
                       "rebuild": LS, "patch_title": S}, ["status", "summary"]), finish, terminal=True),
         ]
+        for t in tools:
+            t.mutates = not t.terminal      # every action tool changes the sources, sat_salome or the image
         # Windows: sat builds every product, there is no system package to install or rename
         return tools if ctx.family.system_packages else [t for t in tools if t.name not in package_tools]
