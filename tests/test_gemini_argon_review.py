@@ -151,3 +151,34 @@ def test_parsers_and_diagnose_support_msvc_and_relative_paths():
     assert "C2065" in q
 
 
+# --------------------------------------------------------------------------- Issue 6
+def test_test_phase_rebuild_failure_preserves_compile_product_and_log(tmp_path):
+    ctx = SimpleNamespace(
+        sat=SimpleNamespace(
+            compile=lambda *a, **k: SimpleNamespace(
+                ok=False,
+                output="Compilation of GEOM ... KO\nSummary: KO (0/1)",
+                log_path=str(tmp_path / "compile.log"),
+            )
+        ),
+        cfg={"policy": {"compile_timeout_s": 60}},
+        app_workdir=tmp_path,
+    )
+    state = {
+        "failure": {
+            "phase": "test",
+            "product": "GUI",
+            "message": "test failed",
+            "feedback": {"tests": ["t1"], "category": "product_bug", "product": "GUI"},
+        },
+        "pending": {"compile": ["GEOM"]},
+    }
+    cmd = rebuild(state, {"configurable": {"ctx": ctx}})
+    assert cmd.goto == "fix"
+    upd = cmd.update["failure"]
+    assert upd["phase"] == "test"
+    assert upd["product"] == "GEOM"
+    assert upd["feedback"]["tests"] == ["t1"]
+    assert "The rebuild after the fix failed:" in upd["message"]
+
+

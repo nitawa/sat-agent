@@ -745,7 +745,13 @@ def rebuild(state, config):
         if f2 is not None or not r.ok:
             f2 = f2 or {"phase": "compile", "product": pending["compile"][0], "message": _excerpt(r.output, None)}
             if phase == "test":
-                f2 = {**failure, "message": "The rebuild after the fix failed:\n" + f2.get("message", "")}
+                f2 = {
+                    **failure,
+                    **f2,
+                    "phase": "test",
+                    "product": f2.get("product") or failure.get("product"),
+                    "message": "The rebuild after the fix failed:\n" + f2.get("message", ""),
+                }
             return Command(update={"failure": f2, "pending": {}}, goto="fix")
     target = _return_target(phase)
     update = {"pending": {}}
