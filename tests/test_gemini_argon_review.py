@@ -117,3 +117,14 @@ def test_virtual_installs_in_local_mode_when_spec_is_none(monkeypatch):
     assert report.installed == ["real-pkg"]
 
 
+# --------------------------------------------------------------------------- Issue 4
+def test_platform_section_name_and_placement_handle_rolling_and_msys2():
+    assert pe.platform_section_name("default_AR", "FD45") == "default_FD45"
+    assert pe.platform_section_name("default_VO", "AR") == "default_AR"
+    assert pe.platform_section_name("default_MSYS_UCRT64", "MSYS_MINGW64") == "default_MSYS_MINGW64"
+    assert pe.platform_section_name("version_1_0_MSYS_MINGW64", "FD45") == "version_1_0_FD45"
+
+    place = sysdeps._placement(["default", "default_AR"], "default", "AR")
+    assert place == {"after": "default_AR"}
+
+

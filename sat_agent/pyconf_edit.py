@@ -337,7 +337,7 @@ def clone_section(text: str, src: str, dst: str) -> str:
     return add_section(text, dst, section_text(text, src), after=src)
 
 
-_PLATFORM_SUFFIX_RE = re.compile(r"_[A-Z]{2,}\d+(?:_\d+)?$")
+_PLATFORM_SUFFIX_RE = re.compile(r"_(?:MSYS_[A-Z0-9]+|AR|VO|[A-Z]{2,}\d+(?:_\d+)?)$")
 
 
 def platform_section_name(section: str, suffix: str) -> str:

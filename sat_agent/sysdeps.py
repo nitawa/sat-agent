@@ -250,9 +250,11 @@ def _placement(sections: list[str], sec: str, dist: str) -> dict:
     code, ver = dist_version_key(dist)
     same = []
     for s in sections:
-        m = re.fullmatch(re.escape(sec) + r"_([A-Z]{2,})(\d+(?:_\d+)?)", s)
-        if m and m.group(1) == code:
-            same.append((s, tuple(int(x) for x in m.group(2).split("_"))))
+        m = re.fullmatch(re.escape(sec) + r"_(MSYS_[A-Z0-9]+|AR|VO|[A-Z]{2,}\d+(?:_\d+)?)", s)
+        if m:
+            s_code, s_ver = dist_version_key(m.group(1))
+            if s_code == code:
+                same.append((s, s_ver))
     if not same:
         return {"after": sec}
     descending = len(same) > 1 and same[0][1] > same[-1][1]
