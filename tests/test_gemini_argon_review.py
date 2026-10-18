@@ -84,3 +84,19 @@ def test_react_mutating_tool_clears_seen_for_read_after_write():
     assert reads == ["v1", "v2"]
 
 
+# --------------------------------------------------------------------------- Issue 2
+def test_text_tool_calls_ignores_preceding_json_prose_and_extracts_all_calls():
+    prose = (
+        'In C++, the initializer `{"tag": "native"}` or `[1, 2, 3]` was used.\n'
+        '```json\n'
+        '{"name": "read_file", "arguments": {"path": "src/main.cxx"}}\n'
+        '```\n'
+        'And then:\n'
+        '{"name": "finish", "arguments": {"fixed": true, "summary": "ok"}}'
+    )
+    calls = text_tool_calls(prose, {"read_file", "finish"})
+    assert [c["name"] for c in calls] == ["read_file", "finish"]
+    assert calls[0]["arguments"] == {"path": "src/main.cxx"}
+    assert calls[1]["arguments"] == {"fixed": True, "summary": "ok"}
+
+

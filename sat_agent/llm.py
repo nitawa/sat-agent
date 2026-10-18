@@ -92,24 +92,33 @@ def _strip_think(text: str | None) -> str:
     return _THINK_RE.sub("", text or "").strip()
 
 
+def _iter_json_objects(text: str):
+    """All top-level decodable JSON objects/arrays in text (models wrap JSON in prose or fences)."""
+    dec = json.JSONDecoder()
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] in "{[":
+            try:
+                obj, end = dec.raw_decode(text, i)
+                yield obj
+                i = end
+                continue
+            except ValueError:
+                pass
+        i += 1
+
+
 def _first_json_object(text: str):
     """First decodable JSON object/array in text (models wrap JSON in prose or fences)."""
-    dec = json.JSONDecoder()
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            try:
-                obj, _ = dec.raw_decode(text[i:])
-                return obj
-            except ValueError:
-                continue
-    return None
+    return next(_iter_json_objects(text), None)
 
 
 def text_tool_calls(content: str, tool_names: set[str]) -> list[dict]:
     """Small local models often write the tool call as JSON text instead of
     a real tool call. Recover {"name": ..., "arguments": {...}} objects."""
-    obj = _first_json_object(_strip_think(content))
-    items = obj if isinstance(obj, list) else [obj] if obj else []
+    items = []
+    for obj in _iter_json_objects(_strip_think(content)):
+        items.extend(obj if isinstance(obj, list) else [obj])
     calls = []
     for it in items:
         if not isinstance(it, dict):
