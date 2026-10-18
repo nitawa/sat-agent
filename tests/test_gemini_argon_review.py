@@ -203,3 +203,29 @@ def test_compact_history_second_pass_stubs_uncompacted_and_compacts_medium_assis
     assert len(msgs[2]["content"]) < len(med_assistant)
 
 
+# --------------------------------------------------------------------------- Issue 8
+def test_log_path_confinement_and_safe_line_matcher(tmp_path):
+    logs_dir = tmp_path / "LOGS" / "GUI"
+    logs_dir.mkdir(parents=True)
+    log_file = logs_dir / "make"
+    log_file.write_text("line 1\ncall operator[](int) failed\nline 3\n", encoding="utf-8")
+
+    ctx = SimpleNamespace(
+        app_workdir=tmp_path,
+        sat_salome_dir=tmp_path,
+        sat_dir=tmp_path,
+        logs_dir=tmp_path / "LOGS",
+        env=SimpleNamespace(windows=False),
+        family=SimpleNamespace(system_packages=False),
+        web=None,
+    )
+    with pytest.raises(PermissionError):
+        resolve_log_path(ctx, "..", "secret.txt")
+
+    tools = {t.name: t.fn for t in make_common_tools(ctx)}
+    # Invalid regex with unclosed bracket `[` should fall back to literal substring search without raising re.error
+    res = tools["read_log"](product="GUI", file="make", grep="operator[](")
+    assert "operator[](int) failed" in res
+    assert safe_line_matcher("[unclosed")("test [unclosed bracket")
+
+

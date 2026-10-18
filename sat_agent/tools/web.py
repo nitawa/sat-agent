@@ -102,7 +102,9 @@ class Web:
         ctype = r.headers.get("content-type", "")
         text = r.text if ("text/plain" in ctype or url.endswith((".patch", ".diff", ".txt"))) else _text(r.text)
         if grep:
+            from sat_agent.tools.common import safe_line_matcher
             lines = text.splitlines()
-            hits = [i for i, ln in enumerate(lines) if re.search(grep, ln, re.I)]
+            match = safe_line_matcher(grep)
+            hits = [i for i, ln in enumerate(lines) if match(ln)]
             text = "\n...\n".join("\n".join(lines[max(0, i - 3): i + 6]) for i in hits[:20]) or "no match"
         return text[:max_chars] + ("\n[truncated]" if len(text) > max_chars else "")

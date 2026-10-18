@@ -86,7 +86,9 @@ class TestSession:
                 return f"unknown test {test!r}"
             lines = t.output.splitlines()
             if grep:
-                hits = [i for i, ln in enumerate(lines) if re.search(grep, ln, re.I)]
+                from sat_agent.tools.common import safe_line_matcher
+                match = safe_line_matcher(grep)
+                hits = [i for i, ln in enumerate(lines) if match(ln)]
                 return "\n--\n".join("\n".join(lines[max(0, i - 3): i + 5]) for i in hits[:30]) or "no match"
             return "\n".join(lines[-int(tail):]) or "(no output captured; try run_test)"
 

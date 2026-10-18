@@ -52,28 +52,47 @@ def py_grep(pattern: str, root: Path, glob: str = "", per_file: int = 20) -> lis
     return out
 
 
+def resolve_log_path(ctx, *parts: str) -> Path:
+    root = (ctx.app_workdir / "LOGS").resolve()
+    p = root.joinpath(*parts).resolve()
+    if p != root and root not in p.parents:
+        raise PermissionError(f"{p} is outside {root}")
+    return p
+
+
+def safe_line_matcher(pattern: str):
+    """Case-insensitive regex matcher that falls back to literal substring search on invalid regex."""
+    try:
+        rx = re.compile(pattern, re.I)
+        return rx.search
+    except re.error:
+        needle = pattern.lower()
+        return lambda ln: needle in ln.lower()
+
+
 def make_common_tools(ctx) -> list[Tool]:
     windows = bool(getattr(ctx.env, "windows", False))
     def product_logs(product: str) -> str:
-        d = ctx.app_workdir / "LOGS" / product
+        d = resolve_log_path(ctx, product)
         if not d.is_dir():
             return f"no LOGS/{product} directory (the product was not compiled yet?)"
-        files = sorted(d.iterdir(), key=lambda f: f.stat().st_mtime)
+        files = sorted((f for f in d.iterdir() if f.is_file()), key=lambda f: f.stat().st_mtime)
         return "\n".join(f"{f.name}\t{f.stat().st_size} bytes" for f in files)
 
     def read_log(product: str, file: str, tail: int = 200, grep: str = "") -> str:
-        f = ctx.app_workdir / "LOGS" / product / file
+        f = resolve_log_path(ctx, product, file)
         if not f.is_file():
             return f"{f} not found; call product_logs first"
         text = strip_ansi(f.read_text(encoding="utf-8", errors="replace"))
         if grep:
             lines = text.splitlines()
-            hits = [i for i, ln in enumerate(lines) if re.search(grep, ln, re.I)]
+            match = safe_line_matcher(grep)
+            hits = [i for i, ln in enumerate(lines) if match(ln)]
             return "\n--\n".join("\n".join(lines[max(0, i - 3): i + 4]) for i in hits[:40]) or "no match"
         return "\n".join(text.splitlines()[-int(tail):])
 
     def log_errors(product: str, file: str) -> str:
-        f = ctx.app_workdir / "LOGS" / product / file
+        f = resolve_log_path(ctx, product, file)
         if not f.is_file():
             return f"{f} not found"
         errs = first_errors(f.read_text(encoding="utf-8", errors="replace"))
