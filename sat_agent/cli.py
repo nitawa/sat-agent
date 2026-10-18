@@ -315,34 +315,39 @@ def cmd_port(args) -> int:
     ctx.request = req
 
     ckpt = _checkpointer(ctx.port_dir / "checkpoints.sqlite")
-    app = build_graph(cfg, ckpt)
-    last = ctx.port_dir / "last_thread"
-    if args.resume and last.exists():
-        thread = last.read_text().strip()
-        inp = None
-        log.info("resuming run %s", thread)
-    else:
-        thread = f"{ctx.dist}-{time.strftime('%Y%m%d-%H%M%S')}"
-        inp = initial_state(thread, ctx.dist, args.batch, stop_after=req.stop_after)
-        last.write_text(thread)
-    if llm is not None:
-        llm.persist_usage(ctx.port_dir / "llm_usage.json", thread)
-    config = {"configurable": {"thread_id": thread, "ctx": ctx}, "recursion_limit": 1000}
     try:
-        final = drive(app, inp, config)
-    except KeyboardInterrupt:
-        log.warning("interrupted; resume with: sat-agent port %s --resume", "--local" if local else req.image)
-        return 130
-    if final.get("report_path"):
-        print(Path(final["report_path"]).read_text(encoding="utf-8"))
-    status = final.get("build_status")
-    failed = [n for n, s in ((final.get("tests") or {}).get("results") or {}).items()
-              if s not in ("passed", "skipped")]
-    log.info("build %s, %d failing test(s); report %s", status, len(failed), final.get("report_path"))
-    for model, u in run_usage(ctx.llm).items():
-        log.info("LLM %s: %d call(s), %d input + %d output tokens (%d reasoning), %.0fs (whole run)", model,
-                 u["calls"], u["prompt_tokens"], u["completion_tokens"], u["reasoning_tokens"], u["seconds"])
-    return 0 if status == "ok" and not failed else 1
+        app = build_graph(cfg, ckpt)
+        last = ctx.port_dir / "last_thread"
+        if args.resume and last.exists():
+            thread = last.read_text().strip()
+            inp = None
+            log.info("resuming run %s", thread)
+        else:
+            thread = f"{ctx.dist}-{time.strftime('%Y%m%d-%H%M%S')}"
+            inp = initial_state(thread, ctx.dist, args.batch, stop_after=req.stop_after)
+            last.write_text(thread)
+        if llm is not None:
+            llm.persist_usage(ctx.port_dir / "llm_usage.json", thread)
+        config = {"configurable": {"thread_id": thread, "ctx": ctx}, "recursion_limit": 1000}
+        try:
+            final = drive(app, inp, config)
+        except KeyboardInterrupt:
+            log.warning("interrupted; resume with: sat-agent port %s --resume", "--local" if local else req.image)
+            return 130
+        if final.get("report_path"):
+            print(Path(final["report_path"]).read_text(encoding="utf-8"))
+        status = final.get("build_status")
+        failed = [n for n, s in ((final.get("tests") or {}).get("results") or {}).items()
+                  if s not in ("passed", "skipped")]
+        log.info("build %s, %d failing test(s); report %s", status, len(failed), final.get("report_path"))
+        for model, u in run_usage(ctx.llm).items():
+            log.info("LLM %s: %d call(s), %d input + %d output tokens (%d reasoning), %.0fs (whole run)", model,
+                     u["calls"], u["prompt_tokens"], u["completion_tokens"], u["reasoning_tokens"], u["seconds"])
+        return 0 if status == "ok" and not failed else 1
+    finally:
+        conn = getattr(ckpt, "conn", None)
+        if conn is not None:
+            conn.close()
 
 
 def cmd_guard(args) -> int:

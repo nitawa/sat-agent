@@ -93,6 +93,11 @@ def _run(args: list[str] | str, timeout: float | None = None, log_path: str | Pa
     finally:
         if timer:
             timer.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if proc.stdout:
+            proc.stdout.close()
         if fh:
             fh.close()
     return ExecResult(rc=proc.returncode, output="\n".join(tail),
