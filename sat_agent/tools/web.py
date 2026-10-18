@@ -50,11 +50,23 @@ def _tavily(query: str, n: int, key: str) -> list[dict]:
             for x in r.json().get("results", [])[:n]]
 
 
+_INJECTION_RE = re.compile(
+    r"(?:<\|[\w_]+\|>|\[/?INST\]|</?(?:system|user|assistant|tool_call|tool_response)>"
+    r"|ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions)",
+    re.I,
+)
+
+
+def _sanitize_web(text: str) -> str:
+    return _INJECTION_RE.sub("[redacted]", text)
+
+
 def _text(fragment: str) -> str:
     t = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", fragment, flags=re.S | re.I)
     t = re.sub(r"<br\s*/?>|</p>|</div>|</li>|</h\d>|</tr>", "\n", t, flags=re.I)
     t = re.sub(r"<[^>]+>", "", t)
     t = html.unescape(t)
+    t = _sanitize_web(t)
     t = re.sub(r"[ \t]+", " ", t)
     return re.sub(r"\n\s*\n+", "\n\n", t).strip()
 
@@ -90,7 +102,10 @@ class Web:
             if len(words) > 8:
                 return self.search(" ".join(words[:8]))
             return "no results"
-        return "\n\n".join(f"[{i + 1}] {r['title']}\n{r['url']}\n{r['snippet']}" for i, r in enumerate(res))
+        return "\n\n".join(
+            f"[{i + 1}] {_sanitize_web(r['title'])}\n{r['url']}\n{_sanitize_web(r['snippet'])}"
+            for i, r in enumerate(res)
+        )
 
     def fetch(self, url: str, max_chars: int = 12000, grep: str | None = None) -> str:
         try:
@@ -100,7 +115,7 @@ class Web:
         if r.status_code >= 400:
             return f"HTTP {r.status_code}"
         ctype = r.headers.get("content-type", "")
-        text = r.text if ("text/plain" in ctype or url.endswith((".patch", ".diff", ".txt"))) else _text(r.text)
+        text = _sanitize_web(r.text) if ("text/plain" in ctype or url.endswith((".patch", ".diff", ".txt"))) else _text(r.text)
         if grep:
             from sat_agent.tools.common import safe_line_matcher
             lines = text.splitlines()
