@@ -7,7 +7,8 @@ terminal `finish` tool or runs out of turns.
 Guard rails for small models, which tend to loop on one call:
 - a call repeating an earlier one (same tool, same arguments) is not run
   again; the model is told to use the result it has and move on, and the
-  loop stops after too many repetitions;
+  loop stops after too many repetitions; an action tool (`mutates`) that runs makes the earlier
+  reads stale, so they may run again (re-reading a file to check an edit is not a repeat);
 - a few turns before the budget ends, the model is asked to conclude;
 - when the budget is spent, one last turn offers only `finish`, so the
   pipeline always gets a diagnosis instead of "no conclusion".
@@ -37,6 +38,7 @@ class Tool:
     parameters: dict
     fn: Callable[..., str]
     terminal: bool = False     # ends the loop; fn returns the outcome dict instead of text
+    mutates: bool = False      # changes sources, pyconf files or the image: earlier reads become stale
 
     def schema(self) -> dict:
         return {"name": self.name, "description": self.description, "parameters": self.parameters}
@@ -99,8 +101,17 @@ def clean_text(s: str) -> str:
     return s.encode("utf-8", errors="replace").decode("utf-8")
 
 
-def _key(name: str, args: dict) -> str:
-    return name + json.dumps(args, sort_keys=True, default=str)
+def _key(name: str, args: dict) -> tuple[str, str]:
+    return name, json.dumps(args, sort_keys=True, default=str)
+
+
+def _forget_reads(seen: dict, by_name: dict) -> None:
+    """After an action tool ran: every earlier call of a read tool may give another result now.
+    The calls of action tools stay known (the same action twice is still a repeat). An action that
+    fails is no exception: it may have written part of its change, and its message usually sends
+    the model back to the file (`old_text found 0 times`)."""
+    for k in [k for k in seen if not getattr(by_name.get(k[0]), "mutates", False)]:
+        del seen[k]
 
 
 def _save(transcript: Path | None, messages: list[dict], outcome: dict) -> None:
@@ -123,7 +134,7 @@ def run_agent(llm, system: str, task: str, tools: list[Tool], cap: int, name: st
     schemas = [t.schema() for t in tools]
     terminal = next((t for t in tools if t.terminal), None)
     messages: list[dict] = [{"role": "system", "content": system}, {"role": "user", "content": task}]
-    seen: dict[str, int] = {}
+    seen: dict[tuple[str, str], int] = {}
     nudges = repeats = 0
     warn_at = max(2, cap - 4)
     outcome = None
@@ -237,6 +248,8 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name, mem=memory.DEFAULTS
             except Exception as e:  # noqa: BLE001 — tool errors go back to the model
                 log.debug("tool %s failed", tool.name, exc_info=True)
                 result = f"{type(e).__name__}: {e}"
+            if tool.mutates:
+                _forget_reads(seen, by_name)
             if tool.terminal and isinstance(result, dict):
                 result.setdefault("turns", turn)
                 tracer.tool(f"{name} {turn}", tool.name, args, result, time.time() - started, raw_args=raw_args)

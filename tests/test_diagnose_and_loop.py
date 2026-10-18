@@ -88,3 +88,51 @@ def test_budget_warning_then_final_finish(tmp_path):
     out = run_agent(llm, "sys", "task", tools, cap=8)
     assert out["summary"] == "diag"
     assert any("turns left" in (m.get("content") or "") for m in llm.last if m["role"] == "user")
+
+
+class Script(LoopingLLM):
+    """Plays a fixed list of calls (one per turn), then finishes."""
+    def __init__(self, calls):
+        super().__init__()
+        self.script = list(calls)
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        call = self.script.pop(0) if self.script else ("finish", {"status": "fixed", "summary": "done"})
+        tc = [{"id": f"c{self.calls}", "name": call[0], "arguments": call[1]}]
+        return {"content": "", "tool_calls": tc, "raw": {"tool_calls": tc, "content": ""}}
+
+
+def test_reads_run_again_after_an_action():
+    """Issue #2: re-reading a file to check an edit is not a repeat; the same edit twice still is."""
+    files = {"a.c": "old"}
+    ran = []
+
+    def read_file(path):
+        ran.append(("read", files[path]))
+        return files[path]
+
+    def edit_source(path, new_text):
+        ran.append(("edit", new_text))
+        files[path] = new_text
+        return "edited"
+    tools = [Tool("read_file", "r", obj({"path": S}), read_file),
+             Tool("edit_source", "e", obj({"path": S, "new_text": S}), edit_source, mutates=True),
+             Tool("finish", "f", obj({"status": S, "summary": S}), lambda **a: dict(a), terminal=True)]
+    read, edit = ("read_file", {"path": "a.c"}), ("edit_source", {"path": "a.c", "new_text": "new"})
+    out = run_agent(Script([read, read, edit, read, edit, read]), "sys", "task", tools, cap=10)
+    assert out["status"] == "fixed"
+    # 2nd read refused (nothing changed), read after the edit runs, the same edit again is refused,
+    # and so is the read after that refused edit
+    assert ran == [("read", "old"), ("edit", "new"), ("read", "new")]
+
+
+def test_build_action_tools_are_marked_as_mutating():
+    from types import SimpleNamespace
+    from sat_agent.tools.build_tools import FixSession
+
+    ctx = SimpleNamespace(env=SimpleNamespace(windows=False), family=SimpleNamespace(system_packages=True))
+    tools = FixSession(ctx, None).tools()
+    assert {t.name for t in tools if t.mutates} == {
+        "edit_source", "install_system_packages", "replace_system_package", "set_product_option",
+        "add_compil_script", "set_product_version", "exclude_product"}
