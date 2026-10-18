@@ -77,7 +77,10 @@ def compact_output(tool: str | None, text: str) -> str:
 
 
 def stub(tool: str | None, text: str) -> str:
-    first = next((ln for ln in text.splitlines()[1:] if ln.strip()), "")[:200]
+    lines = text.splitlines()
+    if lines and lines[0].startswith(MARK):
+        lines = lines[1:]
+    first = next((ln for ln in lines if ln.strip()), "")[:200]
     return f"{MARK}{' output of ' + tool if tool else ' older output'} dropped: {first}]"
 
 
@@ -119,19 +122,21 @@ def compact_history(messages: list[dict], cfg: dict | None = None) -> Compaction
     total = before
     changes: dict[int, dict] = {}
     for shorten in (compact_output, stub):          # first key lines, then one-line stubs
+        threshold = _SMALL if shorten is compact_output else 400
         for i, m in enumerate(messages[2:end], start=2):
             if total <= s["history_low"]:
                 break
             c = m.get("content")
-            if not isinstance(c, str) or len(c) <= (_SMALL if shorten is compact_output else 400):
+            if not isinstance(c, str) or len(c) <= threshold:
                 continue
             tool = names.get(m.get("tool_call_id")) if m.get("role") == "tool" else None
             if m.get("role") == "tool":
                 new = shorten(tool, c)
             elif m.get("role") == "user" and c.startswith("Result of "):   # text-mode tool results
                 new = shorten(None, c)
-            elif m.get("role") == "assistant" and len(c) > _SMALL:
-                new = c[:400] + "\n[... rest of an older answer compacted ...]"
+            elif m.get("role") == "assistant" and len(c) > threshold:
+                limit = 400 if shorten is compact_output else 160
+                new = c[:limit] + "\n[... rest of an older answer compacted ...]"
             else:
                 continue
             if len(new) < len(c):

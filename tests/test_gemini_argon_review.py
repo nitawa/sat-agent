@@ -182,3 +182,24 @@ def test_test_phase_rebuild_failure_preserves_compile_product_and_log(tmp_path):
     assert "The rebuild after the fix failed:" in upd["message"]
 
 
+# --------------------------------------------------------------------------- Issue 7
+def test_compact_history_second_pass_stubs_uncompacted_and_compacts_medium_assistant():
+    med_tool = "first_important_line: status=ko\n" + ("detail line\n" * 60)  # ~750 chars (<= _SMALL 1200, > 400)
+    med_assistant = "A" * 600
+    msgs = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "task"},
+        {"role": "assistant", "content": med_assistant,
+         "tool_calls": [{"id": "t1", "function": {"name": "read_log", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": med_tool},
+        {"role": "assistant", "content": "recent1"},
+        {"role": "assistant", "content": "recent2"},
+    ]
+    comp = memory.compact_history(msgs, {"history_high": 500, "history_low": 250, "keep_turns": 2})
+    assert comp is not None
+    # Pass 2 stub should keep the actual first line of a tool output that was skipped in pass 1
+    assert "first_important_line: status=ko" in msgs[3]["content"]
+    # Pass 2 should also shorten the 600-char assistant message since threshold drops to 400
+    assert len(msgs[2]["content"]) < len(med_assistant)
+
+
