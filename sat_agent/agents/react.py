@@ -28,6 +28,10 @@ from sat_agent.logs import log
 from sat_agent.trace import render_messages, tracer
 
 MAX_TOOL_OUTPUT = 9000
+MUTATING_TOOLS = frozenset({
+    "edit_source", "set_product_option", "set_product_version", "add_compil_script",
+    "exclude_product", "install_system_packages", "replace_system_package",
+})
 
 
 @dataclass
@@ -37,6 +41,7 @@ class Tool:
     parameters: dict
     fn: Callable[..., str]
     terminal: bool = False     # ends the loop; fn returns the outcome dict instead of text
+    mutates: bool = False      # modifies workspace/environment; invalidates cached read tool calls
 
     def schema(self) -> dict:
         return {"name": self.name, "description": self.description, "parameters": self.parameters}
@@ -241,6 +246,9 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name, mem=memory.DEFAULTS
                 result.setdefault("turns", turn)
                 tracer.tool(f"{name} {turn}", tool.name, args, result, time.time() - started, raw_args=raw_args)
                 return result
+            if (tool.mutates or tool.name in MUTATING_TOOLS) and not str(result).startswith(("ERROR:", "refused:", "bad arguments")):
+                seen.clear()
+                seen[key] = turn
             log.debug("  [%s %d] %s took %.1fs", name, turn, tool.name, time.time() - started)
         result = clean_text(str(result))
         if len(result) > MAX_TOOL_OUTPUT:
