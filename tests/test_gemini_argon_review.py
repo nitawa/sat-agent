@@ -100,3 +100,20 @@ def test_text_tool_calls_ignores_preceding_json_prose_and_extracts_all_calls():
     assert calls[1]["arguments"] == {"fixed": True, "summary": "ok"}
 
 
+# --------------------------------------------------------------------------- Issue 3
+def test_virtual_installs_in_local_mode_when_spec_is_none(monkeypatch):
+    monkeypatch.setattr(sysdeps, "apply_replacement", lambda ctx, old, new: True)
+    ctx = SimpleNamespace(
+        dist="FD45",
+        spec=None,
+        not_seen_by_sat=lambda pkgs: [p for p in pkgs if p == "virtual-pkg"],
+        providers=lambda pkg: ["real-pkg"],
+    )
+    report = sysdeps.SysdepsReport()
+    report.installed = ["virtual-pkg"]
+    unresolved = sysdeps._virtual_installs(ctx, ["virtual-pkg"], report)
+    assert unresolved == []
+    assert report.replaced == {"virtual-pkg": "real-pkg"}
+    assert report.installed == ["real-pkg"]
+
+

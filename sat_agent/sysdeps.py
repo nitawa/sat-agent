@@ -271,9 +271,10 @@ def _virtual_installs(ctx, installed: list[str], report: SysdepsReport) -> list[
         real = [p for p in provs if p not in ctx.not_seen_by_sat(provs)] if provs else []
         if real and apply_replacement(ctx, pkg, real[0]):
             report.replaced[pkg] = real[0]
-            ctx.spec.remove_packages([pkg])
-            ctx.spec.add_packages([real[0]])
-            ctx.save_dockerfile()
+            if ctx.spec is not None:
+                ctx.spec.remove_packages([pkg])
+                ctx.spec.add_packages([real[0]])
+                ctx.save_dockerfile()
             report.installed = [real[0] if p == pkg else p for p in report.installed]
             log.info("  %s is provided by %s on %s (sat checks the exact name)", pkg, real[0], ctx.dist)
         else:
@@ -565,8 +566,13 @@ def translate_declarations(ctx, ref: str | None, report: SysdepsReport) -> list[
         if f.stem not in products or not any(k in text for k in src_keys):
             continue
         if f.stem == "salome_system" or pe.system_info_dists(text):
-            excluded = set(pe.get_system_info_list(text, ctx.dist, src + "_exclude"))
-            lists = {k: [x for x in pe.get_system_info_list(text, None, k) + pe.get_system_info_list(text, ctx.dist, k)
+            excluded = set(
+                pe.get_system_info_list(text, None, src + "_exclude")
+                + pe.get_system_info_list(text, ref, src + "_exclude")
+                + pe.get_system_info_list(text, ctx.dist, src + "_exclude")
+            )
+            dist_for_src = ctx.dist if any(pe.get_system_info_list(text, ctx.dist, k) for k in src_keys) else ref
+            lists = {k: [x for x in pe.get_system_info_list(text, None, k) + pe.get_system_info_list(text, dist_for_src, k)
                          if x not in excluded] for k in src_keys}
             plan.append((f, text, lists, None, None))
             continue
