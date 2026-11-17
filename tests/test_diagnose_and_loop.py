@@ -134,5 +134,5 @@ def test_build_action_tools_are_marked_as_mutating():
     ctx = SimpleNamespace(env=SimpleNamespace(windows=False), family=SimpleNamespace(system_packages=True))
     tools = FixSession(ctx, None).tools()
     assert {t.name for t in tools if t.mutates} == {
-        "edit_source", "install_system_packages", "replace_system_package", "set_product_option",
-        "add_compil_script", "set_product_version", "exclude_product"}
+        "edit_source", "enable_repository", "install_system_packages", "replace_system_package",
+        "set_product_option", "add_compil_script", "set_product_version", "exclude_product"}

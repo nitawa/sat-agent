@@ -74,9 +74,14 @@ def missing_items(text: str) -> dict[str, list[str]]:
 
 def _candidates(ctx, kind: str, name: str) -> list[str]:
     fam = ctx.family
+    prov_dis = getattr(ctx, "provides_disabled_repos", None)
+    search_dis = getattr(ctx, "search_disabled_repos", None)
 
     def provides(path: str) -> list[str]:
-        return fam.parse_provides(ctx.env.exec(fam.provides_cmd(path), root=not getattr(ctx, 'local', False), timeout=900).output)
+        res = fam.parse_provides(ctx.env.exec(fam.provides_cmd(path), root=not getattr(ctx, 'local', False), timeout=900).output)
+        if not res and prov_dis:
+            res = [f"{n} (disabled repo: {r})" for n, r in prov_dis(path)]
+        return res
 
     if kind == "headers":
         return provides(name)
@@ -96,6 +101,10 @@ def _candidates(ctx, kind: str, name: str) -> list[str]:
             found = [n for n, _ in fam.parse_search(out)]
             dev = [n for n in found if n.endswith(("-dev", "-devel"))]
             found = (dev or found)[:8]
+        if not found and search_dis:
+            dis = search_dis(name.lower())
+            dev = [f"{n} (disabled repo: {r})" for n, r, _ in dis if n.endswith(("-dev", "-devel"))]
+            found = (dev or [f"{n} (disabled repo: {r})" for n, r, _ in dis])[:8]
         return found
     return []
 

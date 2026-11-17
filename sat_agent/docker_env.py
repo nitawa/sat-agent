@@ -137,6 +137,14 @@ class DockerfileSpec:
         self.packages = sorted(set(self.packages) | set(new))
         return new
 
+    def add_prelude(self, cmd: str) -> bool:
+        """Records a repository-enabling command in the Dockerfile prelude if not already present."""
+        cmd = (cmd or "").strip()
+        if not cmd or cmd in self.prelude:
+            return False
+        self.prelude.append(cmd)
+        return True
+
     def remove_packages(self, pkgs) -> None:
         drop = set(pkgs)
         self.packages = [p for p in self.packages if p not in drop]

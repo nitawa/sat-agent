@@ -138,12 +138,35 @@ def make_common_tools(ctx) -> list[Tool]:
     def search_packages(term: str) -> str:
         out = ctx.env.exec(ctx.family.search_cmd(term), root=not getattr(ctx, 'local', False), timeout=600).output
         res = ctx.family.parse_search(out)
-        return "\n".join(f"{n} - {d}" for n, d in res) or "no package found"
+        seen = {n for n, _ in res}
+        lines = [f"{n} - {d}" for n, d in res]
+        search_dis = getattr(ctx, "search_disabled_repos", None)
+        if search_dis:
+            dis = [(n, r, d) for n, r, d in search_dis(term) if n not in seen]
+            if dis:
+                lines.append("Available in disabled/developer repositories (call enable_repository first):")
+                lines += [f"{n} [repo: {r}] - {d}" for n, r, d in dis]
+        return "\n".join(lines) or "no package found"
 
     def package_providing(file: str) -> str:
         out = ctx.env.exec(ctx.family.provides_cmd(file), root=not getattr(ctx, 'local', False), timeout=1800).output
         names = ctx.family.parse_provides(out)
-        return "\n".join(names) or f"no package provides {file}"
+        seen = set(names)
+        lines = list(names)
+        prov_dis = getattr(ctx, "provides_disabled_repos", None)
+        if prov_dis and not lines:
+            dis = [(n, r) for n, r in prov_dis(file) if n not in seen]
+            if dis:
+                lines.append("Available in disabled/developer repositories (call enable_repository first):")
+                lines += [f"{n} [repo: {r}]" for n, r in dis]
+        return "\n".join(lines) or f"no package provides {file}"
+
+    def list_repositories() -> str:
+        list_repos = getattr(ctx, "list_repositories", None)
+        if list_repos:
+            return list_repos() or "no repository information"
+        return ctx.env.exec(ctx.family.repos_cmd(), root=not getattr(ctx, 'local', False),
+                            timeout=600).output.strip() or "no repository information"
 
     def web_search(query: str) -> str:
         return ctx.web.search(query) if ctx.web and ctx.web.enabled else "web search disabled"
@@ -168,10 +191,15 @@ def make_common_tools(ctx) -> list[Tool]:
                            "python3 -c 'import x'") + ". Do NOT use it to edit files.",
              obj({"command": S, "timeout": I}, ["command"]), run_shell))
     package_tools = [
-        Tool("search_packages", "Search the target's package repositories by package-name pattern.",
+        Tool("search_packages", "Search the target's package repositories (including disabled developer "
+             "repositories) by package-name pattern.",
              obj({"term": S}, ["term"]), search_packages),
         Tool("package_providing", "Find which target packages ship a file, e.g. a missing header "
-             "'GL/glu.h' or 'libfoo.so'.", obj({"file": S}, ["file"]), package_providing),
+             "'GL/glu.h' or 'libfoo.so' (also checks disabled developer repositories).",
+             obj({"file": S}, ["file"]), package_providing),
+        Tool("list_repositories", "List the target's package repositories (enabled, disabled, and available "
+             "developer/extra repository release packages such as devel, crb, powertools, epel, universe, "
+             "contrib, community).", obj({}), list_repositories),
     ] if ctx.family.system_packages else []
     return [
         Tool("product_logs", "List the sat build logs of a product (APP-workdir/LOGS/<product>/: "

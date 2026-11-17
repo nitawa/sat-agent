@@ -170,6 +170,64 @@ class PortContext:
         out = self.env.exec(self.family.provider_cmd(pkg), root=not getattr(self, 'local', False), timeout=600).output
         return [n for n in self.family.parse_provides(out) if n != pkg]
 
+    def list_repositories(self) -> str:
+        """Lists the target's enabled/disabled repositories and available repo-release packages."""
+        if not self.family.system_packages:
+            return "no system repositories on this platform"
+        return self.env.exec(self.family.repos_cmd(), root=not getattr(self, 'local', False),
+                             timeout=600).output.strip()
+
+    def search_disabled_repos(self, term: str) -> list[tuple[str, str, str]]:
+        """Searches disabled developer/extra repositories for package names matching `term`.
+        Returns (package, repo, summary) tuples."""
+        if not self.family.system_packages:
+            return []
+        cmd = self.family.search_disabled_cmd(term)
+        if cmd == "true":
+            return []
+        out = self.env.exec(cmd, root=not getattr(self, 'local', False), timeout=600).output
+        return self.family.parse_disabled_search(out)
+
+    def provides_disabled_repos(self, path: str) -> list[tuple[str, str]]:
+        """Searches disabled developer/extra repositories for packages shipping `path`.
+        Returns (package, repo) tuples."""
+        if not self.family.system_packages:
+            return []
+        cmd = self.family.provides_disabled_cmd(path)
+        if cmd == "true":
+            return []
+        out = self.env.exec(cmd, root=not getattr(self, 'local', False), timeout=900).output
+        return [(n, r) for n, r, _ in self.family.parse_disabled_search(out)]
+
+    def enable_repository(self, repo: str, reason: str = "") -> tuple[bool, str]:
+        """Enables a developer/extra repository (or installs a *-release* repo package) live in
+        the container (local mode: once approved) and records the command in DockerfileSpec.prelude."""
+        repo = (repo or "").strip()
+        if not repo or not self.family.system_packages:
+            return False, f"{self.dist} has no system repositories to enable"
+        try:
+            cmd = self.family.enable_repo_cmd(repo)
+        except ValueError as e:
+            return False, str(e)
+        if self.local:
+            token = f"repo:{repo}"
+            if token not in self.host_approved:
+                if self.ask_install is not None and self.ask_install([token], reason or f"enable repository {repo}"):
+                    self.host_approved.add(token)
+                else:
+                    self.host_refused.add(token)
+                    log.warning("not enabling repository on this machine (not approved): %s", repo)
+                    return False, f"enabling repository {repo!r} on this machine was not approved"
+        log_path = self.logs_dir / "packages.log"
+        r = self.env.exec(cmd, root=True, timeout=1800, log_path=log_path)
+        if not r.ok:
+            log.warning("could not enable repository %s: %s", repo, r.output[-500:])
+            return False, f"could not enable repository {repo!r}:\n{r.output[-800:]}"
+        if self.spec is not None and self.spec.add_prelude(cmd):
+            self.save_dockerfile()
+        log.info("enabled repository %s%s", repo, f" ({reason})" if reason else "")
+        return True, f"repository {repo!r} enabled"
+
     def install_packages(self, pkgs: list[str], reason: str = "") -> tuple[list[str], list[str]]:
         """Installs live in the container (local mode: on this machine, once approved) and records
         them in the Dockerfile.
@@ -381,13 +439,18 @@ def open_port(cfg: dict, image: str, llm=None, web=None, on_existing_branch=None
                       env=env, sat=sat, spec=spec, arch=arch, llm=llm, web=web, distro_name=distro_name)
     ctx.logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # a recreated container lost the packages installed live: reinstall them
+    # a recreated container lost the repos/packages enabled or installed live: restore them
+    extra_prelude = [c for c in spec.prelude if c not in family.bootstrap_prelude]
     if spec.packages:
         missing = env.exec(family.all_installed_cmd(spec.packages), root=True, timeout=600)
         if not missing.ok:
+            for c in extra_prelude:
+                env.exec(c, root=True, timeout=1800)
             env.exec(family.refresh_cmd(), root=True, timeout=1800)
             ctx.install_packages(spec.packages, "restore container")
     else:
+        for c in extra_prelude:
+            env.exec(c, root=True, timeout=1800)
         env.exec(family.refresh_cmd(), root=True, timeout=1800)
 
     _sat_init(ctx, branch)

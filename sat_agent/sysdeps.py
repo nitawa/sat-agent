@@ -149,11 +149,27 @@ def find_replacement(ctx, pkg: str) -> str | None:
                 candidates.append(c)
         if candidates:
             break
-    if not candidates:
-        return None
-    choice = pick_candidate(pkg, candidates, ctx.llm)
+    choice = pick_candidate(pkg, candidates, ctx.llm) if candidates else None
     if choice and ctx.installable([choice]).get(choice):
         return choice
+    # Fallback: check disabled developer/extra repositories
+    search_dis = getattr(ctx, "search_disabled_repos", None)
+    enable_repo = getattr(ctx, "enable_repository", None)
+    if search_dis and enable_repo:
+        dis_cands: list[tuple[str, str]] = []
+        repo_of: dict[str, str] = {}
+        for pat in name_patterns(pkg, ctx.family.name):
+            for name, repo, desc in search_dis(pat):
+                if (name, desc) not in dis_cands:
+                    dis_cands.append((name, desc))
+                    repo_of.setdefault(name, repo)
+            if dis_cands:
+                break
+        choice = pick_candidate(pkg, dis_cands, ctx.llm) if dis_cands else None
+        if choice and repo_of.get(choice):
+            ok, _ = enable_repo(repo_of[choice], f"needed for {choice} (replaces {pkg})")
+            if ok and ctx.installable([choice]).get(choice):
+                return choice
     return None
 
 
@@ -292,10 +308,23 @@ def resolve_missing(ctx, missing: list[str], report: SysdepsReport) -> list[str]
         report.installed += installed
         unresolved += _virtual_installs(ctx, installed, report)
     ko += [p for p in missing if not status.get(p)]
+    search_dis = getattr(ctx, "search_disabled_repos", None)
+    enable_repo = getattr(ctx, "enable_repository", None)
     for pkg in ko:
         if pkg in getattr(ctx, "host_refused", ()):
             unresolved.append(pkg)            # exists, not installed on this machine by choice: no rename
             continue
+        # Check if the exact package name exists in a disabled developer repository
+        if search_dis and enable_repo:
+            dis_repos = [r for n, r, _ in search_dis(pkg) if n == pkg and r]
+            if dis_repos:
+                ok_repo, _ = enable_repo(dis_repos[0], f"needed for {pkg}")
+                if ok_repo and ctx.installable([pkg]).get(pkg):
+                    inst, _ = ctx.install_packages([pkg], f"from repository {dis_repos[0]}")
+                    if inst:
+                        report.installed += inst
+                        unresolved += _virtual_installs(ctx, inst, report)
+                        continue
         new = find_replacement(ctx, pkg)
         if new:
             inst, _ = ctx.install_packages([new], f"replaces {pkg}")

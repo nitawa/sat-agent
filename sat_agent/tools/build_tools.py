@@ -236,7 +236,8 @@ class FixSession:
             bad = [p for p in packages if not status.get(p)]
             if bad:
                 return (f"not available on {ctx.dist}: {', '.join(bad)} -- use search_packages / "
-                        "package_providing to find the right names; nothing was installed")
+                        "package_providing / list_repositories (and enable_repository if the package is in a "
+                        "disabled developer repository) to find the right names; nothing was installed")
             installed, failed = ctx.install_packages(packages, reason)
             if installed:
                 ctx.record_system_dep(installed, runtime=runtime)
@@ -245,6 +246,16 @@ class FixSession:
                 self.actions.append(f"system packages {' '.join(installed)} ({reason or 'build fix'}), "
                                     f"declared in salome_system.pyconf system_info.\"{ctx.dist}\"")
             return f"installed: {installed}; failed: {failed}"
+
+        def enable_repository(repo: str, reason: str = "") -> str:
+            enable = getattr(ctx, "enable_repository", None)
+            if enable is None:
+                return "enabling repositories is not supported in this context"
+            ok, msg = enable(repo, reason)
+            if ok:
+                self.actions.append(f"enabled repository `{repo}` on {ctx.dist}"
+                                    + (f" ({reason})" if reason else ""))
+            return msg
 
         def replace_system_package(old: str, new: str = "") -> str:
             from sat_agent.sysdeps import apply_replacement
@@ -357,12 +368,16 @@ class FixSession:
             "usually the current script (read_file sat_salome/products/compil_scripts/<script>) with a "
             "change such as an extra configure/bootstrap option. Use sat's variables ($SOURCE_DIR, "
             "$PRODUCT_INSTALL, $MAKE_OPTIONS), never local paths.")
-        package_tools = {"install_system_packages", "replace_system_package"}
+        package_tools = {"install_system_packages", "replace_system_package", "enable_repository"}
         tools = [
             Tool("edit_source", "Replace one exact excerpt of a source file of a product (path relative to its "
                  "SOURCES directory). The edit becomes a platform patch automatically; never edit files "
                  "any other way.", obj({"product": S, "path": S, "old_text": S, "new_text": S},
                                        ["product", "path", "old_text", "new_text"]), edit_source),
+            Tool("enable_repository", "Enable a disabled developer/extra repository or install a repository "
+                 "release package (e.g. 'devel', 'almalinux-release-devel', 'crb', 'powertools', 'epel', "
+                 "'universe', 'contrib', 'community') in the platform image and record it in the Dockerfile.",
+                 obj({"repo": S, "reason": S}, ["repo"]), enable_repository),
             Tool("install_system_packages", "Install target packages (exact names, see search_packages) in "
                  "the platform image and declare them for this platform. runtime=true for runtime-only "
                  "dependencies.", obj({"packages": LS, "runtime": B, "reason": S}, ["packages"]),

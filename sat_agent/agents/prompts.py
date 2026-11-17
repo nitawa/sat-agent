@@ -15,7 +15,11 @@ SAT conventions you must respect (sat_salome):
   new toolchain/libraries (set_product_version, 'native' = use the distribution package); a minimal
   source patch (edit_source) ideally taken from upstream (search the web for the exact error and the
   upstream fix/commit). Excluding a product is the last resort and only for optional products.
-- Never guess package names: check them with search_packages / package_providing.
+- Never guess package names: check them with search_packages / package_providing. Many distributions
+  place `-devel` / `-dev` packages or extra build/test tools in separate developer or secondary
+  repositories (e.g. `devel`, `almalinux-release-devel`, `crb`, `powertools`, `epel` on Enterprise
+  Linux; `universe`, `multiverse` on Ubuntu; `contrib`, `non-free` on Debian; `community`, `testing`
+  on Alpine): use list_repositories and enable_repository when a package is in a disabled repository.
 - Keep source patches minimal and generic (no hard-coded paths).
 - sat_salome and sat are changed ONLY through the action tools (run_shell is for diagnosis: whatever
   it writes there is undone). Never write a local path (/home/..., the port directory) into them.
@@ -37,8 +41,10 @@ Method:
 2. Decide what kind of error the FIRST real error is (later errors are often consequences):
    a. something MISSING: header (`fatal error: x.h: No such file`), library (`cannot find -lx`), CMake
       package (`Could NOT find X`), pkg-config module, Python module, program. Find the target package
-      (package_providing for a file, search_packages for a name; the pre-analysis often has it) and
-      install_system_packages. If a declared package was renamed, use replace_system_package.
+      (package_providing for a file, search_packages for a name, list_repositories for disabled
+      developer repos; the pre-analysis often has it), call enable_repository first if the package is in
+      a disabled developer repository, and install_system_packages. If a declared package was renamed,
+      use replace_system_package.
    b. an INCOMPATIBILITY with this release's newer compiler or libraries (code that compiled on {ref}:
       API removed or made opaque, new warnings as errors, stricter headers, e.g. "invalid use of
       incomplete typedef" with OpenSSL 4). Search the web for the error message (keywords, no paths,
@@ -168,12 +174,12 @@ def fmt(template: str, ctx, ref: str | None, platforms: list[str]) -> str:
 GUIDANCE_TASK = """\
 Nothing has been built yet for {dist}: the platform was just registered (inheriting from {ref}).
 Before the first `sat prepare` / `sat compile`, apply now those of the maintainer's instructions that
-are changes to make up front, with the action tools: product versions (set_product_version), product
-options (set_product_option), system packages (install_system_packages), products to drop on this
-platform (exclude_product, only if they ask for it). Sources are not downloaded yet: source patches
-are not possible now, and instructions on how to handle later failures need no action now (you will
-see them again when a failure happens).
-Check names before acting (read_product_pyconf, search_packages, grep in sat_salome).
+are changes to make up front, with the action tools: enabling developer/extra repositories
+(enable_repository), product versions (set_product_version), product options (set_product_option),
+system packages (install_system_packages), products to drop on this platform (exclude_product, only if
+they ask for it). Sources are not downloaded yet: source patches are not possible now, and instructions
+on how to handle later failures need no action now (you will see them again when a failure happens).
+Check names before acting (read_product_pyconf, list_repositories, search_packages, grep in sat_salome).
 Then call finish(status='applied', summary=<what you changed, instruction by instruction>) or
 finish(status='nothing_to_apply', summary=<why>).
 """

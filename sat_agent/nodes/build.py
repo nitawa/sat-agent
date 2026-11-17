@@ -636,13 +636,14 @@ def _task(ctx, state, failure: dict) -> str:
         lines += ["`sat config --check_system` still reports these system packages missing; they do not "
                   "exist under that name on this release and no obvious replacement was found:",
                   "  " + " ".join(failure.get("packages") or []), "",
-                  "For each one: find the package that replaces it on this release (search_packages, "
-                  "package_providing, web; mind case changes such as python3-Cython -> python3-cython) and "
-                  "call replace_system_package(old, new): it installs the new name and rewrites the "
-                  "declaration for this platform only. If the platform genuinely does not need/provide it, "
-                  "call replace_system_package(old, new='') to drop it here. Or switch the product needing "
-                  "it to a source build (set_product_version). Use grep on sat_salome/products to see which "
-                  "product declares a package."]
+                  "For each one: check if it is in a disabled developer/extra repository (search_packages, "
+                  "list_repositories -> enable_repository) or find the package that replaces it on this "
+                  "release (search_packages, package_providing, web; mind case changes such as "
+                  "python3-Cython -> python3-cython) and call replace_system_package(old, new): it installs "
+                  "the new name and rewrites the declaration for this platform only. If the platform "
+                  "genuinely does not need/provide it, call replace_system_package(old, new='') to drop it "
+                  "here. Or switch the product needing it to a source build (set_product_version). Use grep "
+                  "on sat_salome/products to see which product declares a package."]
     elif phase == "prepare":
         lines += [f"`sat prepare` failed for product {product or '?'}.", failure.get("message", "")]
     elif phase == "compile":

@@ -181,6 +181,84 @@ class PkgFamily:
                 names.append(name)
         return names
 
+    # --- developer / extra repositories -------------------------------------
+    def repos_cmd(self) -> str:
+        """Lists configured repositories (enabled and disabled) and available
+        repository-configuration packages/components."""
+        return {
+            "dnf": "dnf repolist --all 2>/dev/null; "
+                   "echo '--- Available *-release* packages ---'; "
+                   "dnf -q repoquery --qf '%{name} - %{summary}\\n' '*-release*' 'epel-release*' 2>/dev/null | sort -u",
+            "apt": "grep -rhvE '^\\s*(#|$)' /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | head -40; "
+                   "echo '--- Extra components (enable_repository): universe, multiverse, restricted (Ubuntu); "
+                   "contrib, non-free, non-free-firmware (Debian) ---'",
+            "zypper": "zypper -n lr -u 2>/dev/null",
+            "pacman": "grep -E '^\\[.*\\]' /etc/pacman.conf 2>/dev/null",
+        }.get(self.name, "true")
+
+    def search_disabled_cmd(self, term: str) -> str:
+        """Searches disabled developer/extra repositories for package names matching term.
+        Prints '<name> [repo: <reponame>] - <summary>'."""
+        if self.name == "dnf":
+            g = shlex.quote(f"*{term}*")
+            return ("dnf -q repoquery --enablerepo='*' "
+                    "--disablerepo='*-source*,*-debug*,*media*,*testing*' "
+                    f"--qf '%{{name}} [repo: %{{reponame}}] - %{{summary}}\\n' {g} 2>/dev/null | sort -u | head -60")
+        return "true"
+
+    def provides_disabled_cmd(self, path: str) -> str:
+        """Searches disabled developer/extra repositories for packages shipping `path`.
+        Prints '<name> [repo: <reponame>]'."""
+        if self.name == "dnf":
+            g = shlex.quote(f"*/{path.lstrip('/')}")
+            return ("dnf -q repoquery --enablerepo='*' "
+                    "--disablerepo='*-source*,*-debug*,*media*,*testing*' "
+                    f"--qf '%{{name}} [repo: %{{reponame}}]\\n' --whatprovides {g} 2>/dev/null | sort -u | head -40")
+        return "true"
+
+    def parse_disabled_search(self, out: str) -> list[tuple[str, str, str]]:
+        """Parses '<name> [repo: <reponame>] - <summary>' into (name, repo, summary) tuples."""
+        res: list[tuple[str, str, str]] = []
+        rx = re.compile(r"^(\S+)\s+\[repo:\s*([^\]]+)\](?:\s*-\s*(.*))?$")
+        for line in out.splitlines():
+            m = rx.match(line.strip())
+            if m:
+                name, repo, desc = m.group(1), m.group(2).strip(), (m.group(3) or "").strip()
+                if (name, repo, desc) not in res:
+                    res.append((name, repo, desc))
+        return res
+
+    def enable_repo_cmd(self, repo: str) -> str:
+        """Idempotent shell command (run as root) enabling a developer/extra repository
+        or installing a repository release package, followed by a metadata refresh."""
+        repo = (repo or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.+-]+", repo):
+            raise ValueError(f"invalid repository name {repo!r}")
+        q = shlex.quote(repo)
+        if self.name == "dnf":
+            if repo == "epel" or repo == "epel-release":
+                return "dnf install -y epel-release && dnf -q makecache"
+            if "-release" in repo:
+                sub = repo.split("-release-", 1)[1] if "-release-" in repo else ""
+                en = (f" && (dnf config-manager --set-enabled {shlex.quote(sub)} 2>/dev/null "
+                      f"|| dnf config-manager setopt {shlex.quote(sub + '.enabled=1')} 2>/dev/null || true)") if sub else ""
+                return f"dnf install -y {q}{en} && dnf -q makecache"
+            return (f"(dnf install -y dnf-plugins-core 2>/dev/null || true) "
+                    f"&& (dnf install -y almalinux-release-{q} 2>/dev/null || true) "
+                    f"&& (dnf config-manager --set-enabled {q} 2>/dev/null "
+                    f"|| dnf config-manager setopt {shlex.quote(repo + '.enabled=1')} 2>/dev/null || true) "
+                    f"&& dnf -q makecache")
+        if self.name == "apt":
+            return (f"for f in /etc/apt/sources.list.d/*.sources; do "
+                    f"[ -f \"$f\" ] && ! grep -qw {q} \"$f\" && sed -i \"/^Components:/ s/$/ {repo}/\" \"$f\"; "
+                    f"done; "
+                    f"if [ -f /etc/apt/sources.list ] && ! grep -qw {q} /etc/apt/sources.list; then "
+                    f"sed -i -E \"/^deb / s/$/ {repo}/\" /etc/apt/sources.list; fi; "
+                    f"apt-get update -q")
+        if self.name == "zypper":
+            return f"zypper -n mr -e {q} && zypper -n -q refresh"
+        raise ValueError(f"enabling extra repositories is not supported for {self.name}")
+
 
 APT = PkgFamily(
     name="apt",
@@ -273,6 +351,31 @@ class SpecFamily(PkgFamily):
 
     def parse_provides(self, out: str) -> list[str]:
         return [n for n, _ in self.parse_search(out)]
+
+    def repos_cmd(self) -> str:
+        if self.name == "apk":
+            return ("cat /etc/apk/repositories 2>/dev/null; "
+                    "echo '--- Extra branches (enable_repository): community, testing ---'")
+        if self.name == "xbps":
+            return "xbps-query -L 2>/dev/null; xbps-query -R -s void-repo- 2>/dev/null"
+        return self.spec.get("repos") or "true"
+
+    def enable_repo_cmd(self, repo: str) -> str:
+        repo = (repo or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_.+-]+", repo):
+            raise ValueError(f"invalid repository name {repo!r}")
+        q = shlex.quote(repo)
+        if self.name == "apk":
+            return (f"sed -i 's|^#\\s*\\(.*/{repo}\\)$|\\1|' /etc/apk/repositories; "
+                    f"grep -q '/{repo}$' /etc/apk/repositories || "
+                    f"sed -n '1s|/main$|/{repo}|p' /etc/apk/repositories >> /etc/apk/repositories; "
+                    f"apk update -q")
+        if self.name == "xbps":
+            pkg = repo if repo.startswith("void-repo-") else f"void-repo-{repo}"
+            return f"xbps-install -y {shlex.quote(pkg)} && xbps-install -S"
+        if self.spec.get("enable_repo"):
+            return self.spec["enable_repo"].format(repo=q)
+        raise ValueError(f"enabling extra repositories is not supported for {self.name}")
 
 
 def family_from_spec(spec: dict) -> SpecFamily:
@@ -405,9 +508,15 @@ def family_named(name: str, spec: dict | None = None) -> PkgFamily:
     raise ValueError(f"unknown package family {name!r}")
 
 
-# Enterprise-Linux rebuilds need CRB + EPEL for a large part of SALOME's deps.
-_EL_PRELUDE = ("dnf install -y dnf-plugins-core epel-release "
-               "&& (dnf config-manager --set-enabled crb || dnf config-manager --set-enabled powertools || true)",)
+# Enterprise-Linux rebuilds need CRB/PowerTools, EPEL, and the devel repository (AlmaLinux/Rocky)
+# for a large part of SALOME's dependencies and test tools (such as xorg-x11-server-Xvfb on EL10).
+_EL_PRELUDE = (
+    "dnf install -y dnf-plugins-core epel-release "
+    "&& (dnf install -y almalinux-release-devel 2>/dev/null || true) "
+    "&& for r in crb powertools devel; do "
+    "dnf config-manager --set-enabled \"$r\" 2>/dev/null "
+    "|| dnf config-manager setopt \"${r}.enabled=1\" 2>/dev/null || true; done",
+)
 
 
 @dataclass

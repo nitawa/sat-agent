@@ -91,3 +91,127 @@ def test_exclusion_semantics(sat_copy, monkeypatch):
     seen.clear()
     product.check_system_dep("UB26.04", ["dpkg-query", "-l"], info)
     assert seen[0] == ["a", "b"] and seen[1] == ["c"]
+
+
+def test_devel_repositories_and_tools(tmp_path):
+    import types
+    import pytest
+    from sat_agent.diagnose import pre_analysis
+    from sat_agent.docker_env import ExecResult
+    from sat_agent.platform import SPECS, ZYPPER, family_from_spec
+    from sat_agent.sysdeps import SysdepsReport, resolve_missing
+    from sat_agent.tools.build_tools import FixSession
+    from sat_agent.tools.common import make_common_tools
+
+    # 1. EL prelude enables epel, almalinux-release-devel, crb, powertools, devel
+    alma = family_for(OSRelease.parse('ID="almalinux"\nID_LIKE="rhel centos fedora"\nVERSION_ID="10.3"'))
+    assert "almalinux-release-devel" in alma.bootstrap_prelude[0]
+    assert "for r in crb powertools devel" in alma.bootstrap_prelude[0]
+
+    # 2. enable_repo_cmd & search_disabled_cmd across families
+    assert "almalinux-release-devel" in DNF.enable_repo_cmd("devel")
+    assert "dnf install -y almalinux-release-synergy" in DNF.enable_repo_cmd("almalinux-release-synergy")
+    assert "universe" in APT.enable_repo_cmd("universe")
+    assert "zypper -n mr -e" in ZYPPER.enable_repo_cmd("devel_languages_python")
+    apk = family_from_spec(SPECS["apk"])
+    assert "/community" in apk.enable_repo_cmd("community")
+    with pytest.raises(ValueError):
+        DNF.enable_repo_cmd("bad;rm -rf /")
+
+    parsed = DNF.parse_disabled_search(
+        "xorg-x11-server-Xvfb [repo: devel] - X virtual framebuffer server\n"
+        "cppunit-devel [repo: crb] - C++ unit test headers\n"
+    )
+    assert parsed == [
+        ("xorg-x11-server-Xvfb", "devel", "X virtual framebuffer server"),
+        ("cppunit-devel", "crb", "C++ unit test headers"),
+    ]
+
+    # 3. DockerfileSpec.add_prelude records dynamic repo activations without duplicates
+    spec = DockerfileSpec.new("almalinux:10", alma, title="Alma 10")
+    cmd = DNF.enable_repo_cmd("synergy")
+    assert spec.add_prelude(cmd) is True
+    assert spec.add_prelude(cmd) is False
+    assert f"RUN {cmd}" in spec.render()
+
+    # 4. sysdeps.resolve_missing auto-enables a disabled developer repo when a package lives there
+    enabled_repos: list[str] = []
+    installed_pkgs: list[str] = []
+    sal = tmp_path / "sat_salome"
+    (sal / "products").mkdir(parents=True)
+    (sal / "products" / "salome_system.pyconf").write_text(
+        'default :\n{\n  system_info :\n  {\n    rpm_dev : ["xorg-x11-server-Xvfb", "libfoo1-devel"]\n'
+        '    "CO10" :\n    {\n      rpm : []\n      rpm_dev : []\n    }\n  }\n}\n',
+        encoding="utf-8",
+    )
+
+    def enable_repo(repo, reason=""):
+        enabled_repos.append(repo)
+        spec.add_prelude(DNF.enable_repo_cmd(repo))
+        return True, f"repository {repo!r} enabled"
+
+    def search_dis(term):
+        if "Xvfb" in term or "xorg" in term:
+            return [("xorg-x11-server-Xvfb", "devel", "X virtual framebuffer")]
+        if "libfoo" in term:
+            return [("libfoo2-devel", "synergy", "Foo v2 headers")]
+        return []
+
+    ctx = types.SimpleNamespace(
+        dist="CO10",
+        suffix="CO10",
+        app="MEDCOUPLING-master-native",
+        osr=OSRelease.parse('ID="almalinux"\nPRETTY_NAME="AlmaLinux 10.3"'),
+        family=DNF,
+        llm=None,
+        web=None,
+        spec=spec,
+        sat_salome_dir=sal,
+        sat_dir=tmp_path / "sat",
+        app_workdir=tmp_path / "work",
+        logs_dir=tmp_path / "logs",
+        port_dir=tmp_path / "port",
+        cfg={"paths": {}},
+        env=types.SimpleNamespace(
+            windows=False,
+            exec=lambda c, **kw: ExecResult(0, "baseos enabled\ndevel disabled\n" if "repolist" in c else "", None),
+        ),
+        installable=lambda pkgs: {
+            p: (p == "xorg-x11-server-Xvfb" and "devel" in enabled_repos)
+            or (p == "libfoo2-devel" and "synergy" in enabled_repos)
+            for p in pkgs
+        },
+        install_packages=lambda pkgs, reason="": (installed_pkgs.extend(pkgs) or list(pkgs), []),
+        not_seen_by_sat=lambda pkgs: [],
+        providers=lambda pkg: [],
+        search_disabled_repos=search_dis,
+        provides_disabled_repos=lambda path: [("xorg-x11-server-Xvfb", "devel")] if "Xvfb" in path else [],
+        enable_repository=enable_repo,
+        list_repositories=lambda: "baseos enabled\ndevel disabled",
+    )
+
+    rep = SysdepsReport()
+    unresolved = resolve_missing(ctx, ["xorg-x11-server-Xvfb", "libfoo1-devel"], rep)
+    assert unresolved == []
+    assert enabled_repos == ["devel", "synergy"]
+    assert "xorg-x11-server-Xvfb" in rep.installed
+    assert rep.replaced == {"libfoo1-devel": "libfoo2-devel"}
+
+    # 5. pre_analysis surfaces candidates from disabled developer repositories
+    pa = pre_analysis(ctx, "MEDCOUPLING", "fatal error: Xvfb.h: No such file or directory\n", web=False)
+    assert "xorg-x11-server-Xvfb (disabled repo: devel)" in pa
+
+    # 6. Agent tools: list_repositories, search_packages (disabled repos), enable_repository
+    common = {t.name: t for t in make_common_tools(ctx)}
+    assert "list_repositories" in common
+    assert "devel disabled" in common["list_repositories"].fn()
+    search_out = common["search_packages"].fn("Xvfb")
+    assert "Available in disabled/developer repositories" in search_out
+    assert "xorg-x11-server-Xvfb [repo: devel]" in search_out
+
+    session = FixSession(ctx, "CO9")
+    btools = {t.name: t for t in session.tools(upfront=True)}
+    assert "enable_repository" in btools
+    msg = btools["enable_repository"].fn(repo="devel", reason="maintainer prompt")
+    assert "enabled" in msg
+    assert any("enabled repository `devel`" in a for a in session.actions)
