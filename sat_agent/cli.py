@@ -250,10 +250,12 @@ def start_trace(args, cfg: dict) -> None:
 
 def cmd_port(args) -> int:
     from sat_agent import request as rq
-    from sat_agent.context import open_local_port, open_port
+    from langgraph.errors import GraphRecursionError
+
+    from sat_agent.context import GuardViolation, open_local_port, open_port
     from sat_agent.git_workspace import BranchInUse
     from sat_agent.graph import build_graph
-    from sat_agent.llm import LLMClient, run_usage
+    from sat_agent.llm import LLMClient, LLMError, run_usage
     from sat_agent.state import initial_state
     from sat_agent.tools.web import Web
     from sat_agent.docker_env import docker_available
@@ -328,11 +330,21 @@ def cmd_port(args) -> int:
     if llm is not None:
         llm.persist_usage(ctx.port_dir / "llm_usage.json", thread)
     config = {"configurable": {"thread_id": thread, "ctx": ctx}, "recursion_limit": 1000}
+    resume = f"sat-agent port {'--local' if local else req.image} --resume"
     try:
         final = drive(app, inp, config)
     except KeyboardInterrupt:
-        log.warning("interrupted; resume with: sat-agent port %s --resume", "--local" if local else req.image)
+        log.warning("interrupted; resume with: %s", resume)
         return 130
+    except (LLMError, GuardViolation, GraphRecursionError) as e:
+        # the checkpoint keeps every step done so far: the run can continue once the cause is fixed
+        log.debug("run stopped", exc_info=True)
+        log.error("run stopped: %s: %s", type(e).__name__, e)
+        if isinstance(e, GraphRecursionError):
+            log.error("the graph looped without progress (recursion limit %d); see the trace (--trace)",
+                      config["recursion_limit"])
+        log.error("once the cause is fixed, resume with: %s", resume)
+        return 3
     if final.get("report_path"):
         print(Path(final["report_path"]).read_text(encoding="utf-8"))
     status = final.get("build_status")
@@ -436,7 +448,11 @@ def main(argv=None) -> int:
         sp.add_argument("-w", "--work-root", metavar="DIR", default=argparse.SUPPRESS,
                         help="working directory (overrides paths.work_root of the config file)")
     args = p.parse_args(argv)
-    cfg_dir = Path(get_config(args)["paths"]["work_root"])
+    try:
+        cfg_dir = Path(get_config(args)["paths"]["work_root"])
+    except (OSError, ValueError) as e:        # missing / invalid config file: one clean message
+        print(f"sat-agent: {e}", file=sys.stderr)
+        return 2
     cfg_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(args.verbose, str(cfg_dir / "sat-agent.log"))
     try:

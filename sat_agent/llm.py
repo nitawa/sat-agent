@@ -88,6 +88,22 @@ def run_usage(llm) -> dict:
     return {getattr(llm, "model", "llm"): u} if u and u.get("calls") else {}
 
 
+def _retry_after(value: str | None, default: float) -> float:
+    """Seconds to wait from a Retry-After header: a number of seconds or an HTTP date (RFC 9110)."""
+    if not value:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(value)
+        return max(0.0, when.timestamp() - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return default
+
+
 def _strip_think(text: str | None) -> str:
     return _THINK_RE.sub("", text or "").strip()
 
@@ -174,20 +190,25 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         last = None
         for attempt in range(self.max_retries + 1):
+            wait = 2 ** attempt * 2
             try:
                 r = requests.post(f"{self.base_url}/chat/completions", json=payload,
                                   headers=headers, timeout=self.timeout, verify=self.verify)
                 if r.status_code == 429 or r.status_code >= 500:
                     last = LLMError(f"HTTP {r.status_code}: {r.text[:300]}")
-                    wait = float(r.headers.get("Retry-After", 2 ** attempt * 2))
-                    time.sleep(min(wait, 60))
-                    continue
-                if r.status_code >= 400:
+                    wait = _retry_after(r.headers.get("Retry-After"), wait)
+                elif r.status_code >= 400:
                     raise LLMError(f"HTTP {r.status_code}: {r.text[:500]}")
-                return r.json()
-            except (requests.ConnectionError, requests.Timeout) as e:
+                else:
+                    try:
+                        return r.json()
+                    except ValueError as e:      # a proxy's HTML page, a truncated body...
+                        last = LLMError(f"HTTP {r.status_code} but no JSON body: {r.text[:300]!r}")
+                        log.debug("non-JSON LLM answer: %s", e)
+            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError) as e:
                 last = e
-                time.sleep(2 ** attempt * 2)
+            if attempt < self.max_retries:
+                time.sleep(min(wait, 60))
         raise LLMError(f"LLM endpoint failed after {self.max_retries + 1} attempts: {last}")
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict:

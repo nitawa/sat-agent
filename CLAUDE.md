@@ -52,7 +52,12 @@ No lint config; `python -m pyflakes sat_agent` is used to keep imports clean.
   package; the guard also rejects local paths; `apply_guidance` runs only if the prompt says more
   than "port <app> to <target>"; `edit_source` only edits under `SOURCES/<product>` of a product of
   the application (it once patched sat itself with `product='../../../sat'`); tool outputs are
-  cleaned of lone surrogates (`react.clean_text`) before being stored or sent.
+  cleaned of lone surrogates (`react.clean_text`) before being stored or sent. A fixer run that is
+  not kept (give_up, failed registration, guard) is undone (`nodes/build._undo_session`: source
+  edits + sat/sat_salome worktrees; installed packages stay declared); every product rebuilt after
+  a compile/test fix is `sat prepare`d first (pristine sources + registered patches only);
+  `edit_source` works on bytes (`read_source`/`write_source`: latin-1, CRLF kept); batch policy
+  values are validated (`config.validate_config`) and batch decisions never re-queue.
 - macOS (local only): `distro_support.macos_plan` (sat name from the distro module, new code, version
   rule "macos" = `platform.mac_ver()` major, spec family `platform.SPECS["brew"]`). Local mode asks
   per product in `system_deps` → `native_choices` (`kind: missing_on_host`, answers in

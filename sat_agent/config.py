@@ -124,4 +124,38 @@ def load_config(path: str | Path | None) -> dict:
         if not val.is_absolute():
             val = (base_dir / val).resolve()
         cfg["paths"][key] = str(val)
+    validate_config(cfg)
     return cfg
+
+
+# batch decisions: a value outside these would make the graph ask again forever (nobody answers)
+POLICY_CHOICES = {
+    "on_failure": ("abort", "skip"),
+    "unmapped_native": ("embed", "none", "remove"),
+    "missing_on_host": ("source", "install", "skip"),
+    "local_install": ("no", "yes"),
+}
+POLICY_POSITIVE = ("sysdeps_passes", "prepare_fix_attempts", "compile_fix_attempts", "agent_iteration_cap",
+                   "command_timeout_s", "compile_timeout_s")
+
+
+class ConfigError(ValueError):
+    pass
+
+
+def validate_config(cfg: dict) -> None:
+    """Rejects policy values the graph cannot act on (raises ConfigError)."""
+    pol = cfg.get("policy") or {}
+    errs = []
+    for key, allowed in POLICY_CHOICES.items():
+        if pol.get(key) not in allowed:
+            errs.append(f"policy.{key} = {pol.get(key)!r}: expected one of {', '.join(allowed)}")
+    for key in POLICY_POSITIVE:
+        v = pol.get(key)
+        if not isinstance(v, int) or isinstance(v, bool) or v < 1:
+            errs.append(f"policy.{key} = {v!r}: expected a positive integer")
+    v = pol.get("max_test_cycles")
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        errs.append(f"policy.max_test_cycles = {v!r}: expected an integer >= 0")
+    if errs:
+        raise ConfigError("invalid configuration:\n  " + "\n  ".join(errs))

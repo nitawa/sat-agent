@@ -14,6 +14,7 @@ still too big after that are replaced by a one-line stub. The system prompt, the
 last `keep_turns` turns are never touched; message order and tool-call pairing are kept.
 """
 
+import json
 import re
 from typing import NamedTuple
 
@@ -104,8 +105,41 @@ class Compaction(NamedTuple):
 
     def memory_before(self, messages: list[dict]) -> list[dict]:
         """The conversation as it was before the compaction (`messages` is the compacted one)."""
-        old = {c["index"]: c["old"] for c in self.changes}
-        return [{**m, "content": old[i]} if i in old else m for i, m in enumerate(messages)]
+        by_index = {c["index"]: c for c in self.changes}
+        out = []
+        for i, m in enumerate(messages):
+            c = by_index.get(i)
+            if c is not None:
+                m = {**m, "content": c["old"]}
+                if "old_tool_calls" in c:
+                    m["tool_calls"] = c["old_tool_calls"]
+            out.append(m)
+        return out
+
+
+_ARG_KEEP = 300                  # characters kept of a long argument of an old tool call
+
+
+def compact_tool_calls(tool_calls: list[dict]) -> list[dict] | None:
+    """Old tool calls with their long string arguments shortened (the full new_text of an
+    edit_source, the content of a build script): the arguments stay valid JSON objects, ids and
+    names are kept (pairing with the tool results). None if nothing is long enough."""
+    out, changed = [], False
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except ValueError:
+            args = None
+        if isinstance(args, dict):
+            short = {k: (v[:_ARG_KEEP] + f" [... {len(v)} chars, compacted]" if isinstance(v, str)
+                         and len(v) > _ARG_KEEP + 100 and not v.endswith("compacted]") else v)
+                     for k, v in args.items()}
+            if short != args:
+                changed = True
+                tc = {**tc, "function": {**fn, "arguments": json.dumps(short)}}
+        out.append(tc)
+    return out if changed else None
 
 
 def compact_history(messages: list[dict], cfg: dict | None = None) -> Compaction | None:
@@ -122,6 +156,15 @@ def compact_history(messages: list[dict], cfg: dict | None = None) -> Compaction
         for i, m in enumerate(messages[2:end], start=2):
             if total <= s["history_low"]:
                 break
+            if shorten is compact_output and m.get("role") == "assistant" and m.get("tool_calls"):
+                short = compact_tool_calls(m["tool_calls"])
+                if short is not None:
+                    total -= len(str(m["tool_calls"])) - len(str(short))
+                    ch = changes.setdefault(i, {"index": i, "role": "assistant", "tool": None,
+                                                "old": m.get("content") or ""})
+                    ch["old_tool_calls"] = m["tool_calls"]
+                    m["tool_calls"] = short
+                    ch["new"] = m.get("content") or ""
             c = m.get("content")
             if not isinstance(c, str) or len(c) <= (_SMALL if shorten is compact_output else 400):
                 continue

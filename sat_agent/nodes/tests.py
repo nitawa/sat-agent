@@ -74,7 +74,22 @@ def run_tests(state, config):
     res = parse_ctest(r.output)
     for t in res.tests:
         results[t.name] = t.status
-    tests.update(results=results, logs=list(tests.get("logs") or []) + [str(log_path)],
+    logs = list(tests.get("logs") or []) + [str(log_path)]
+    if include and cycle > 1 and res.tests and not res.failed:
+        # the rerun of the failed tests passes, but the rebuilds since may have broken tests that passed
+        # before: one full run confirms it (its log is the one analyze reads)
+        full_log = ctx.logs_dir / f"tests-cycle{cycle}-full.log"
+        log.info("test cycle %d: the failed tests pass now; full run to catch regressions", cycle)
+        r = ctx.env.exec(test_cmd(ctx, [], tcfg.get("include", ""), tcfg.get("exclude", ""), test_dirs=dirs),
+                         timeout=tcfg.get("timeout_s", 6 * 3600), log_path=full_log, cwd=str(ctx.app_workdir),
+                         keep_lines=200000)
+        full = parse_ctest(r.output)
+        if full.tests:
+            res = full
+            for t in res.tests:
+                results[t.name] = t.status
+            logs.append(str(full_log))
+    tests.update(results=results, logs=logs,
                  last={"total": res.total, "failed": [t.name for t in res.failed], "rc": r.rc})
     log.info("test cycle %d: %d test(s), %d failed", cycle, len(res.tests), len(res.failed))
     if not res.tests:

@@ -69,6 +69,16 @@ def declared_packages(text: str, keys: tuple[str, ...], dist: str | None = None)
     return found
 
 
+def read_source(path: Path) -> str:
+    """A source file exactly as it is: undecodable bytes (latin-1 comments) kept as surrogates and
+    line ends untouched (CRLF stays CRLF), so that the edit and the patch match the pristine file."""
+    return path.read_bytes().decode("utf-8", errors="surrogateescape")
+
+
+def write_source(path: Path, text: str) -> None:
+    path.write_bytes(text.encode("utf-8", errors="surrogateescape"))
+
+
 class FixSession:
     def __init__(self, ctx, ref_dist: str | None):
         self.ctx = ctx
@@ -79,6 +89,20 @@ class FixSession:
         self.prepare: set[str] = set()
         self.patches: list[str] = []
         self.packages: list[str] = []
+        self.declared: list[tuple[list[str], bool]] = []   # record_system_dep calls (packages, runtime)
+
+    def rollback(self) -> list[str]:
+        """Puts the edited source files back as they were before the session (a fix that was not
+        kept must not leak into the next attempt, whose patch would then miss it)."""
+        restored = []
+        for (product, rel), original in self.originals.items():
+            try:
+                write_source(self.source_root(product) / rel, original)
+                restored.append(f"{product}/{rel}")
+            except (OSError, ValueError) as e:
+                log.warning("could not restore %s/%s: %s", product, rel, e)
+        self.originals.clear()
+        return restored
 
     # ---------------------------------------------------------------- helpers
     def source_root(self, product: str) -> Path:
@@ -135,7 +159,7 @@ class FixSession:
             root = self.source_root(product)
             chunks = []
             for rel, original in sorted(files):
-                current = (root / rel).read_text(encoding="utf-8", errors="replace")
+                current = read_source(root / rel)
                 if current == original:
                     continue
                 a = original.splitlines(keepends=True)
@@ -144,6 +168,7 @@ class FixSession:
                     a[-1] += "\n\\ No newline at end of file\n"
                 if b and not b[-1].endswith("\n"):
                     b[-1] += "\n\\ No newline at end of file\n"
+                # lineterm "\n" for the headers only: the content lines keep their own ends (CRLF)
                 chunks.append("".join(difflib.unified_diff(a, b, f"a/{rel}", f"b/{rel}")))
             if not chunks:
                 continue
@@ -153,7 +178,7 @@ class FixSession:
             while (patches_dir / name).exists():
                 name = f"{product}-{_slug(title)}-{i}-{self.ctx.dist}.patch"
                 i += 1
-            (patches_dir / name).write_text("".join(chunks), encoding="utf-8")
+            write_source(patches_dir / name, "".join(chunks))
             info = self.ctx.sat.product_info(product)
             current_patches = [Path(p).name for p in info.get("patches") or []]
             section = self.platform_section(product)
@@ -189,16 +214,20 @@ class FixSession:
                 return f"refused: {p} is not under the sources of {product} ({root})"
             if not p.is_file():
                 return f"{p} does not exist"
-            text = p.read_text(encoding="utf-8", errors="replace")
+            text = read_source(p)
             if not old_text:
                 return ("old_text is empty: to insert lines, give an existing anchor line as old_text (e.g. the "
                         "first #include) and repeat it in new_text together with the new lines")
+            if "\r\n" in text and "\r" not in old_text and old_text not in text:
+                # CRLF file: the model writes "\n"; keep the file's line ends in the edit
+                old_text = old_text.replace("\n", "\r\n")
+                new_text = new_text.replace("\r\n", "\n").replace("\n", "\r\n")
             n = text.count(old_text)
             if n != 1:
                 return f"old_text found {n} times in {p.name}; give a unique, exact excerpt (with indentation)"
             rel = p.relative_to(root).as_posix()      # patch paths use "/" (Windows too)
             self.originals.setdefault((product, rel), text)
-            p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+            write_source(p, text.replace(old_text, new_text, 1))
             self.rebuild.add(product)
             return f"edited {rel} (will become a {ctx.dist} patch of {product})"
 
@@ -211,6 +240,7 @@ class FixSession:
             installed, failed = ctx.install_packages(packages, reason)
             if installed:
                 ctx.record_system_dep(installed, runtime=runtime)
+                self.declared.append((installed, runtime))
                 self.packages += installed
                 self.actions.append(f"system packages {' '.join(installed)} ({reason or 'build fix'}), "
                                     f"declared in salome_system.pyconf system_info.\"{ctx.dist}\"")

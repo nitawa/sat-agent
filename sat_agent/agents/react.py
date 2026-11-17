@@ -16,6 +16,7 @@ Every conversation can be saved (transcript) to understand a failure; with --tra
 request, answer and tool call is also written as it happens (sat_agent/trace.py).
 """
 
+import inspect
 import json
 import re
 import time
@@ -29,6 +30,10 @@ from sat_agent.logs import log
 from sat_agent.trace import render_messages, tracer
 
 MAX_TOOL_OUTPUT = 9000
+
+
+class _BadArguments(TypeError):
+    pass
 
 
 @dataclass
@@ -242,8 +247,12 @@ def _turn(llm, messages, schemas, by_name, seen, turn, name, mem=memory.DEFAULTS
             seen[key] = turn
             started = time.time()
             try:
+                try:
+                    inspect.signature(tool.fn).bind(**args)
+                except TypeError as e:          # the model's arguments, not a bug inside the tool
+                    raise _BadArguments(str(e)) from e
                 result = tool.fn(**args)
-            except TypeError as e:
+            except _BadArguments as e:
                 result = f"bad arguments for {tool.name}: {e}"
             except Exception as e:  # noqa: BLE001 — tool errors go back to the model
                 log.debug("tool %s failed", tool.name, exc_info=True)

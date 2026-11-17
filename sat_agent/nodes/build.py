@@ -155,6 +155,10 @@ def native_choices(state, config):
     if act == "embed" and not embed.get("tag"):
         log.warning("%s: no version known to build it from sources", product)
         act = "remove" if state.get("batch") else None
+    if state.get("batch") and act not in ("embed", "none", "remove"):
+        # nobody to ask again ("package" needs a name): re-queuing the item would loop forever
+        log.warning("%s: batch decision %r not possible, removing it on %s", product, act, ctx.dist)
+        act = "remove"
     fixes, skipped = list(state.get("fixes") or []), list(state.get("skipped") or [])
     app = ctx.app_file()
     if act == "embed":
@@ -236,6 +240,8 @@ def _missing_on_host(state, ctx, item: dict, pending: list[dict]):
         act = pol.get("missing_on_host", "source")
         if act == "source" and not buildable:
             act = "install" if pol.get("local_install") == "yes" else "skip"
+        if act not in HOST_ACTIONS:
+            act = "skip"                     # never re-queue in batch: nobody would answer
         decision = {"action": act}
     else:
         decision = interrupt({**item, "buildable": buildable})
@@ -369,6 +375,7 @@ def apply_guidance(state, config):
     log.info("build agent: applying the maintainer's instructions")
     ref = state.get("ref_dist")
     session = FixSession(ctx, ref)
+    before = _snapshot(ctx)
     system = prompts.fmt(prompts.BUILD_SYSTEM, ctx, ref, state.get("platforms") or [])
     task = prompts.GUIDANCE_TASK.format(dist=ctx.dist, ref=ref or "nothing")
     outcome = run_agent(ctx.llm, system, task, make_common_tools(ctx) + session.tools(upfront=True),
@@ -376,6 +383,19 @@ def apply_guidance(state, config):
                         transcript=_transcript(ctx, "guidance"), memory_cfg=ctx.cfg.get("memory"))
     record = {"key": "guidance:None", "phase": "guidance", "product": None, "status": outcome.get("status"),
               "summary": outcome.get("summary", "")}
+    if outcome.get("status") not in ("applied", "nothing_to_apply"):
+        # no conclusion (turn budget spent...): its half-made changes are not kept
+        undone = _undo_session(ctx, session, before)
+        if undone:
+            record["summary"] += " [unfinished: changes undone: " + ", ".join(undone[:20]) + "]"
+        session.actions, session.patches = [], []
+    elif session.originals:
+        try:
+            session.finalize(outcome.get("patch_title") or "instructions")   # source edits become patches
+        except Exception as e:  # noqa: BLE001
+            log.error("could not register the source edits of the instructions: %s", e)
+            _undo_session(ctx, session, before)
+            session.actions, session.patches = [], []
     _keep_in_scope(ctx, session, record)
     done["guidance"] = req.digest()
     update = {"done": done}
@@ -387,6 +407,27 @@ def apply_guidance(state, config):
     else:
         log.info("no up-front change for the instructions: %s", record["summary"][:200])
     return Command(update=update, goto="system_deps")
+
+
+def _snapshot(ctx) -> dict:
+    """Uncommitted state of the sat and sat_salome worktrees before an agent runs (see _undo_session)."""
+    return {Path(r): gw.snapshot(r) for r in (ctx.sat_salome_dir, ctx.sat_dir) if (Path(r) / ".git").exists()}
+
+
+def _undo_session(ctx, session, before: dict) -> list[str]:
+    """Undoes what an agent run that is not kept changed: its source edits and its sat / sat_salome
+    changes (pyconf, application, patches, scripts), so that they neither leak into the next attempt
+    nor get committed with another change. Packages it installed stay installed in the image (that
+    cannot be undone), so they stay declared."""
+    undone = []
+    for repo, snap in before.items():      # first: the sources are found through the application as it was
+        undone += [f"{repo.name}/{rel}" for rel in gw.undo_since(repo, snap)]
+    undone += [f"SOURCES/{x}" for x in session.rollback()]
+    for pkgs, runtime in session.declared:
+        ctx.record_system_dep(pkgs, runtime=runtime)
+    if undone:
+        log.info("undone (attempt not kept): %s", ", ".join(undone))
+    return undone
 
 
 def _keep_in_scope(ctx, session, record: dict) -> bool:
@@ -496,9 +537,23 @@ def prepare(state, config):
     if pr.missing_native:
         pkgs = sorted({p for v in pr.missing_native.values() for p in v})
         report = SysdepsReport()
-        if not resolve_missing(ctx, pkgs, report):
+        attempts = dict(state.get("attempts") or {})
+        key = "deps:prepare"
+        attempts[key] = attempts.get(key, 0) + 1
+        # bounded: an install that "succeeds" while sat still reports the package missing (a virtual
+        # name, a provides) would loop prepare -> prepare otherwise
+        unresolved = resolve_missing(ctx, pkgs, report) if attempts[key] <= 2 else pkgs
+        update = {"attempts": attempts, "sysdeps": _merge_report(state.get("sysdeps"), report)}
+        if not unresolved:
             _commit(ctx, "System prerequisites of native products")
-            return Command(update={"sysdeps": _merge_report(state.get("sysdeps"), report)}, goto="prepare")
+            return Command(update=update, goto="prepare")
+        if not pr.failed_patches and not pr.failed_sources:
+            # a system package problem: the fixer gets the sysdeps task and tools, not "prepare failed"
+            update["failure"] = {"phase": "sysdeps", "product": None, "packages": unresolved,
+                                 "message": "`sat prepare` refuses to run: native products miss system packages "
+                                            "that could not be installed: " + " ".join(unresolved),
+                                 "log_file": r.log_path}
+            return Command(update=update, goto="fix")
     if pr.failed_patches:
         product, patch = pr.failed_patches[0]
         msg = f"Patch {patch} does not apply on the sources of {product}.\n" + _excerpt(r.output, patch)
@@ -679,6 +734,7 @@ def fix(state, config):
     log.info("build agent: fixing %s (attempt %d/%d)", key, attempts[key], limit)
     ref = state.get("ref_dist")
     session = FixSession(ctx, ref)
+    before = _snapshot(ctx)
     system = prompts.fmt(prompts.BUILD_SYSTEM, ctx, ref, state.get("platforms") or [])
     outcome = run_agent(ctx.llm, system, _task(ctx, state, failure),
                         make_common_tools(ctx) + session.tools(), _policy(ctx)["agent_iteration_cap"],
@@ -699,6 +755,9 @@ def fix(state, config):
     record.update(actions=session.actions, patches=session.patches, packages=session.packages,
                   status=outcome.get("status"))
     if outcome.get("status") != "fixed":
+        undone = _undo_session(ctx, session, before)
+        if undone:
+            record["summary"] += " [changes of this attempt undone: " + ", ".join(undone[:20]) + "]"
         return Command(update={"failure": failure, "attempts": attempts, "gave_up": (state.get("gave_up") or []) + [record]},
                        goto="failure_gate")
 
@@ -709,6 +768,11 @@ def fix(state, config):
     prep = set(session.prepare)
     if phase == "prepare" and product:
         prep.add(product)
+    if phase in ("compile", "test"):
+        # every product rebuilt starts from pristine sources + its registered patches: a fix made
+        # outside the action tools (sed in SOURCES through run_shell) would otherwise pass the rebuild
+        # without being in sat_salome
+        prep |= rebuild
     pending = {"prepare": sorted(prep), "compile": sorted(rebuild) if phase in ("compile", "test") else []}
     log.info("fix applied: %s", record["summary"][:200])
     return Command(update={"failure": failure, "attempts": attempts, "fixes": (state.get("fixes") or []) + [record],
@@ -760,7 +824,9 @@ def failure_gate(state, config):
     ctx = _ctx(config)
     failure = state.get("failure") or {}
     if state.get("batch"):
-        action = {"action": _policy(ctx).get("on_failure", "abort")}
+        # retry would reset the attempts and come back here forever: batch only aborts or skips
+        pol = _policy(ctx).get("on_failure", "abort")
+        action = {"action": pol if pol in ("abort", "skip") else "abort"}
     else:
         action = interrupt({"kind": "build_failure", "phase": failure.get("phase"),
                             "product": failure.get("product"), "message": failure.get("message", "")[-4000:],
